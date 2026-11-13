@@ -22,3 +22,6 @@ node_modules/
 npm-debug.log*
 .idea/
 .vscode/
+
+# WorkBuddy 发布标记文件（内部产物，勿提交）
+*.genie
