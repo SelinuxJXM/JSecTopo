@@ -1,0 +1,14 @@
+{
+  "name": "dengbao-topology",
+  "version": "1.0.0",
+  "private": true,
+  "description": "网络安全等级保护测评专用网络拓扑绘制工具（纯前端、离线可用）",
+  "scripts": {
+    "test": "node tests/verify.js",
+    "check:release": "node tests/check-release.js"
+  },
+  "license": "MIT",
+  "engines": {
+    "node": ">=16"
+  }
+}

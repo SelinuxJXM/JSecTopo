@@ -1,0 +1,24 @@
+# ── 导出物：可能含真实 IP、设备型号、资产台账，禁止提交 ──
+# 工程导出 JSON 请统一放到 exports/ 目录；根目录 JSON 一律忽略，仅保留 package.json
+/*.json
+!/package.json
+exports/
+
+资产清单_*.csv
+等保合规自检_*.txt
+整改前后差异_*.txt
+*_报告版式.png
+*_报告版式.svg
+*.png.bak
+
+# ── 本地工作数据（个人工作记录，不公开；请勿删除该目录）──
+.workbuddy/
+
+# ── 编辑器 / 系统 / 依赖 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+node_modules/
+npm-debug.log*
+.idea/
+.vscode/

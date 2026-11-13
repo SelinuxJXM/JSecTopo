@@ -1,0 +1,22 @@
+name: tests
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+      - name: Syntax check
+        run: |
+          for f in assets/js/*.js tests/verify.js; do node --check "$f"; done
+      - name: Release readiness check
+        run: node tests/check-release.js
+      - name: Regression tests
+        run: node tests/verify.js
