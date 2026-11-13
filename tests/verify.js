@@ -9,7 +9,7 @@ const vm = require('vm');
 const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const FILES = ['assets/js/icons.js', 'assets/js/schema.js', 'assets/js/templates.js',
-  'assets/js/compliance.js', 'assets/js/report.js', 'assets/js/app.js'];
+  'assets/js/report.js', 'assets/js/app.js'];
 
 class El {
   constructor(id) {
@@ -68,7 +68,7 @@ function createApp(preset, extraStore) {
         fake('data-toggle-menu', 'align-menu'), fake('data-toggle-menu', 'export-menu')]);
       if (sel.indexOf('data-align') >= 0) return qsa.align || (qsa.align = ['left', 'top'].map(a => fake('data-align', a)));
       if (sel.indexOf('data-export') >= 0) return qsa.export || (qsa.export =
-        ['png', 'svg', 'framed-png', 'framed-svg', 'json', 'csv', 'report-txt', 'diff-txt', 'last'].map(a => fake('data-export', a)));
+        ['png', 'svg', 'framed-png', 'framed-svg', 'json', 'csv', 'diff-txt', 'last'].map(a => fake('data-export', a)));
       return [];
     }
   };
@@ -161,7 +161,7 @@ t('schema：字段集仅保留 6 项且 normalize 补默认值', () => {
 });
 t('schema：v3 默认去箭头，v2 工程一次性迁移', () => {
   const S = M.window.TopoSchema;
-  if (S.VERSION !== 3 || S.LINK_DEFAULTS.arrow !== false) throw new Error('全局默认值未改');
+  if (S.VERSION < 3 || S.LINK_DEFAULTS.arrow !== false) throw new Error('全局默认值未改');
   const old = S.normalize({ version: 2, nodes: [{ id: 'a', label: 'A' }, { id: 'b', label: 'B' }],
     links: [{ id: 'l', from: 'a', to: 'b', arrow: true }] });
   if (old.links.length !== 1 || old.links[0].arrow !== false) throw new Error('旧工程箭头未迁移');
@@ -189,22 +189,12 @@ t('schema：IP 与必填校验', () => {
   if (!S.validateField({}, 'label', '', [])) throw new Error('必填项未拦截');
   if (S.validateField({}, 'ip', '10.0.0.1', [])) throw new Error('合法 IP 被误判');
 });
-t('compliance：链路感知自检 / 证据矩阵 / 边界与路径', () => {
-  const A = M.window.TopoCompliance.analyze(PROJ, 3);
-  if (!A.checks.length || !A.matrix.length) throw new Error('检查项或矩阵为空');
-  if (!A.counts.review && !A.counts.ok) throw new Error('状态统计异常');
-  if (!A.boundaries.length) throw new Error('未识别跨区链路');
-  if (!A.paths && A.paths !== []) throw new Error('路径分析异常');
-  if (!A.checks.some(c => c.status === 'na' || c.status === 'miss' || c.status === 'ok')) throw new Error('状态值异常');
-});
 t('report：A4 版式含标题栏 / 图例 / 页脚', () => {
   const R = M.window.TopoReport;
   const xml = R.frameSVG('<svg viewBox="0 0 900 600"><rect x="0" y="0" width="900" height="600" fill="#fff"/></svg>',
     { x: 0, y: 0, w: 900, h: 600 }, PROJ.meta, PROJ, M.window.TopoIcons);
   if (!xml.includes('viewBox="0 0 1123 794"') || !xml.includes('图　例') || !xml.includes('内部资料')) throw new Error('版式要素缺失');
   if (!xml.includes('第 1 页')) throw new Error('页脚缺失');
-  const txt = R.reportText(PROJ, M.window.TopoCompliance.analyze(PROJ, 3), PROJ.meta);
-  if (!txt.includes('自检汇总') || !txt.includes('边界链路识别')) throw new Error('文本报告章节缺失');
 });
 t('templates：稳定 ID 与完整字段', () => {
   const T = M.window.TopoTemplates;
@@ -439,24 +429,6 @@ t('工具栏下拉：fixed 定位并按按钮坐标显示', () => {
   if (!m.style.left || !m.style.top) throw new Error('菜单未写入 fixed 定位坐标');
   m.classList.remove('show');
 });
-t('合规自检：三视图（结果 / 证据矩阵 / 边界分析）', () => {
-  A.click('tab-check');
-  const p = A.G('panel-check');
-  if (!p.includes('check-views') || !p.includes('check-card')) throw new Error('自检视图缺失');
-  if (!p.includes('待人工核实') && !p.includes('符合')) throw new Error('状态缺失');
-  A.fire('panel-check', 'click', fake('data-cview', 'matrix'));
-  const mx = A.G('panel-check');
-  if (!mx.includes('matrix-card') || !mx.includes('mx-table')) throw new Error('证据矩阵缺失');
-  if (!mx.includes('设备型号') || mx.includes('对象编号')) throw new Error('证据矩阵列未同步精简字段');
-  A.fire('panel-check', 'click', fake('data-cview', 'boundary'));
-  const bh = A.G('panel-check');
-  if (!bh.includes('bd-hd')) throw new Error('边界分析视图未渲染');
-  if (!bh.includes('bd-card') && !bh.includes('未识别到跨区')) throw new Error('边界分析内容缺失');
-  /* 三级模板含互联网入口与跨区链路，确认边界条目确实能产出 */
-  const tpl = M.window.TopoTemplates.build('l3');
-  const big = M.window.TopoCompliance.analyze(tpl, 3);
-  if (!big.boundaries.length || !big.paths.length) throw new Error('模板边界/路径分析为空');
-});
 t('报告版式 SVG：含标题栏 / 图例 / 密级', () => {
   const btn = A.qsa().export.find(b => b.getAttribute('data-export') === 'framed-svg');
   btn.onclick();
@@ -508,13 +480,62 @@ t('导入校验：合法工程可迁移', () => {
   fi.onchange.call(fi);
   if (!A.G('layer-nodes').includes('旧版路由器')) throw new Error('旧版工程未导入');
 });
+t('数据模型 v4：区域标签九宫格 / 连接点 / 端点迁移', () => {
+  const Sch = M.window.TopoSchema;
+  if (Sch.VERSION !== 4) throw new Error('VERSION 应为 4，实际 ' + Sch.VERSION);
+  if (!Sch.ZONE_DEFAULTS.labelPos) throw new Error('区域缺少 labelPos（标签位置）');
+  if (Sch.ZONE_DEFAULTS.desc !== '') throw new Error('区域缺少多行说明字段');
+  if (!Sch.ANCHOR_DEFAULTS) throw new Error('缺少 ANCHOR_DEFAULTS（连接点）');
+  /* 含区域端点与连接点端点的连线应能通过校验 */
+  const v = Sch.validate({
+    version: 4, nodes: [{ id: 'n', icon: 'router', x: 0, y: 0, label: '路由器' }],
+    zones: [{ id: 'z', x: 0, y: 0, w: 100, h: 100, label: '安全区' }],
+    anchors: [{ id: 'a', x: 0, y: 0, label: '外部系统' }],
+    links: [{ id: 'l', from: 'n', to: 'z', style: 'ortho' }, { id: 'l2', from: 'n', to: 'a', style: 'ortho' }],
+    meta: { name: '迁移工程' }
+  });
+  if (!v.ok) throw new Error('含区域 / 连接点端点的连线校验失败：' + JSON.stringify(v.warnings));
+  if (v.data.anchors.length !== 1) throw new Error('连接点未保留');
+});
+/* 以下交互用例各自使用干净工程实例，避免依赖测试顺序对全局画布状态的累积 */
+function ptrFires(B, target, x, y) { B.svgFire('pointerdown', { button: 0, clientX: x, clientY: y, target: target, shiftKey: false, altKey: false, preventDefault() {}, stopPropagation() {} }); }
+function pupFires(B) { B.winFire('pointerup', { clientX: 0, clientY: 0, target: {}, preventDefault() {} }); }
+t('交互：连线可连到区域框（边界链路）', () => {
+  const B = createApp(PROJ);
+  B.click('btn-link');
+  ptrFires(B, ptrTarget('n3', 'node', null), 650, 150);
+  ptrFires(B, ptrTarget('z1', 'zone', null), 200, 150);
+  const p = B.G('panel-prop');
+  if (!p.includes('DMZ区')) throw new Error('连线未连到区域框：' + p.slice(0, 160));
+  if (p.includes('?')) throw new Error('端点未正确解析');
+});
+t('交互：右键打包选中资产为区域', () => {
+  const B = createApp(PROJ);
+  ptrFires(B, ptrTarget('n3', 'node', null), 650, 150); pupFires(B);
+  B.fire('context-menu', 'click', fake('data-act', 'pack-zone'));
+  if (!B.G('layer-zones').includes('安全区域')) throw new Error('打包后未生成新区域');
+});
+t('交互：连线属性交换起止方向', () => {
+  const B = createApp(PROJ);
+  ptrFires(B, ptrTarget('l1', 'link', null), 250, 150); pupFires(B);
+  const ftBefore = (B.G('panel-prop').match(/link-fromto">([\s\S]*?)<\/div>/) || [])[1] || '';
+  B.fire('panel-prop', 'click', fake('data-act', 'swap-link'));
+  const ftAfter = (B.G('panel-prop').match(/link-fromto">([\s\S]*?)<\/div>/) || [])[1] || '';
+  if (ftAfter.indexOf('Web服务器') >= ftAfter.indexOf('边界防火墙')) throw new Error('方向未交换：before=' + ftBefore + ' after=' + ftAfter);
+});
+t('交互：连线属性线型应用到全部', () => {
+  const B = createApp(PROJ);
+  ptrFires(B, ptrTarget('l2', 'link', null), 450, 150); pupFires(B);
+  B.fire('panel-prop', 'click', fake('data-act', 'apply-style-all'));
+  if (B.count(B.G('layer-links'), /class="link"/g) < 2) throw new Error('应用线型后连线异常');
+});
 t('撤销 / 重做 / 复制粘贴 / 删除 / 对齐 / 网格 / 缩放不抛错', () => {
   ['btn-undo', 'btn-redo', 'btn-copy', 'btn-paste', 'btn-duplicate', 'btn-delete',
     'btn-grid', 'btn-snap', 'btn-minimap', 'btn-zoom-in', 'btn-zoom-out', 'btn-fit',
     'btn-link', 'btn-link', 'btn-hand', 'btn-hand', 'btn-help'].forEach(id => A.click(id));
   A.qsa().align.forEach(b => b.onclick && b.onclick());
 });
-t('四种普通导出与差异 / 自检报告导出不抛错', () => {
+t('四种普通导出与差异不抛错', () => {
   A.qsa().export.forEach(b => b.onclick && b.onclick());
 });
 

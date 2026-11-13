@@ -221,30 +221,7 @@
     }
   ];
 
-  /* ---------------- 等级保护合规自检规则 ----------------
-   * clause 依据 GB/T 22239-2019《信息安全技术 网络安全等级保护基本要求》
-   * ids    可满足该控制点的资产图标 id
-   * need   仅当拓扑中存在这些资产时才检查（否则标记"不适用"）
-   * levels 适用的等保级别
-   */
-  const CHECKS = [
-    { key: 'boundary', title: '安全区域边界 · 访问控制', clause: '安全区域边界 / 访问控制', levels: [2, 3], ids: ['firewall', 'ngfw', 'utm', 'gap', 'firewall-route', 'microseg'], advice: '应在网络边界或区域之间部署访问控制设备，并启用默认拒绝策略。' },
-    { key: 'region', title: '安全区域划分', clause: '安全通信网络 / 网络架构', levels: [2, 3], zoneMin: 2, advice: '应划分不同的网络区域（如 DMZ、业务区、数据库区、管理区），并按区域分配地址。' },
-    { key: 'ids', title: '入侵防范（网络层）', clause: '安全区域边界 / 入侵防范', levels: [2, 3], ids: ['ips', 'ids', 'ngfw', 'nta', 'risk-monitor'], advice: '应在关键网络节点处检测、防止或限制从外部/内部发起的网络攻击行为。' },
-    { key: 'malware', title: '恶意代码防范', clause: '安全区域边界 / 恶意代码防范', levels: [2, 3], ids: ['av-gw', 'av-server', 'edr', 'sandbox', 'anti-spam'], advice: '应在关键网络节点处对恶意代码进行检测和清除，并维护防护机制的升级。' },
-    { key: 'waf', title: 'Web 应用防护', clause: '安全计算环境 / 入侵防范', levels: [3], need: ['web', 'portal', 'appsys', 'app-mobile', 'api-gw', 'waf-cloud'], ids: ['waf', 'waf-cloud', 'web-tamper'], advice: '对外提供 Web 服务时，应部署 WAF / 网页防篡改，防范注入、跨站等攻击。' },
-    { key: 'audit', title: '安全审计（集中日志）', clause: '安全区域边界 / 安全审计', levels: [2, 3], ids: ['log-audit', 'siem', 'soc', 'security-audit', 'log-data'], advice: '应在网络边界、重要网络节点进行安全审计，审计记录应留存不少于 6 个月。' },
-    { key: 'dbaudit', title: '数据库访问审计', clause: '安全计算环境 / 安全审计', levels: [3], need: ['database', 'db-cluster', 'datawarehouse', 'bigdata'], ids: ['db-audit', 'dbfw', 'dlp'], advice: '存在数据库资产时，应对数据库访问行为进行独立审计（数据库审计设备/数据库防火墙）。' },
-    { key: 'bastion', title: '运维操作审计', clause: '安全管理中心 / 集中管控', levels: [3], ids: ['bastion', 'iam'], advice: '应通过堡垒机对运维操作进行身份鉴别、授权与操作审计，避免直连设备运维。' },
-    { key: 'iam', title: '身份鉴别与访问控制', clause: '安全计算环境 / 身份鉴别', levels: [2, 3], ids: ['iam', 'ca', 'keymgmt', 'ztna', 'net-admission'], advice: '应对登录用户进行身份标识和鉴别，具备口令复杂度、登录失败处理与双因素措施。' },
-    { key: 'vuln', title: '漏洞与基线管理', clause: '安全管理中心 / 安全管理', levels: [3], ids: ['vuln-scan', 'baseline', 'code-audit', 'pentest'], advice: '应定期开展漏洞扫描、配置基线核查，及时修补高危漏洞。' },
-    { key: 'backup', title: '数据备份与恢复', clause: '安全计算环境 / 数据备份恢复', levels: [2, 3], ids: ['backup', 'tape', 'backup-data', 'nas', 'storage', 'datawarehouse'], advice: '应提供重要数据本地备份与恢复功能，三级系统还应具备异地实时/定时备份。' },
-    { key: 'crypto', title: '通信与数据保密性', clause: '安全通信网络 / 通信传输', levels: [3], ids: ['vpn', 'crypto', 'ca', 'keymgmt', 'lock'], advice: '应采用密码技术保证通信过程中数据的保密性、完整性（如 VPN / 国密加密）。' },
-    { key: 'vpn', title: '远程/分支接入加密', clause: '安全通信网络 / 通信传输', levels: [2, 3], need: ['branch', 'admin', 'internet', 'cloud'], ids: ['vpn', 'ztna', 'crypto'], advice: '存在远程运维或分支机构接入时，应建立加密传输通道。' },
-    { key: 'soc', title: '集中管控 / 安全管理中心', clause: '安全管理中心 / 集中管控', levels: [3], ids: ['siem', 'soc', 'risk-monitor', 'nta'], advice: '三级系统应对分散的设备进行集中监测、集中日志分析与统一策略管理。' },
-    { key: 'dlp', title: '数据防泄漏与剩余信息保护', clause: '安全计算环境 / 剩余信息保护', levels: [3], need: ['database', 'db-cluster', 'fileserver', 'storage', 'nas'], ids: ['dlp', 'crypto', 'oneway', 'gap'], advice: '应保证鉴别信息、敏感数据所在的存储空间被释放或重新分配前得到完全清除。' },
-    { key: 'ha', title: '链路与设备冗余', clause: '安全通信网络 / 网络架构', levels: [3], ids: ['switch-core', 'lb', 'hci', 'db-cluster'], min: 2, advice: '三级系统关键网络链路、核心设备应提供冗余，避免单点故障。' }
-  ];
+
 
   window.TopoTemplates = {
     list: function () { return DEFS.map(function (d) { return { id: d.id, name: d.name, level: d.level, desc: d.desc }; }); },
@@ -252,6 +229,5 @@
       const d = DEFS.find(function (x) { return x.id === id; });
       return d ? build(d) : null;
     },
-    checks: CHECKS
   };
 })();

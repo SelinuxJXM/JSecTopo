@@ -48,7 +48,7 @@ function allowedIp(ip) {
     ip === '0.0.0.0' || ip === '255.255.255.255';
 }
 const IP_RE = /\b(?:\d{1,3}\.){3}\d{1,3}\b/g;
-const EXPORT_RE = /^资产清单_|^等保合规自检_|^整改前后差异_|_报告版式\.(png|svg)$/;
+const EXPORT_RE = /^资产清单_|^整改前后差异_|_报告版式\.(png|svg)$/;
 
 files.forEach(function (f) {
   const rel = path.relative(ROOT, f).replace(/\\/g, '/');

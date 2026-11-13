@@ -67,6 +67,10 @@ button{cursor:pointer}
 .menu-line{height:1px;background:var(--line);margin:5px 4px}
 .menu.context{position:fixed;top:0;left:0;min-width:180px}
 .menu.context.show{display:block}
+/* 右键菜单按上下文裁剪：空白右键隐藏「打包」，连线右键隐藏「放置连接点」 */
+.menu.context[data-ctx="blank"] [data-act="pack-zone"]{display:none}
+.menu.context[data-ctx="link"] [data-act="pack-zone"]{display:none}
+.menu.context[data-ctx="link"] [data-act="add-anchor"]{display:none}
 
 /* ---------------- 三栏布局 ---------------- */
 .workspace{display:grid;grid-template-columns:232px minmax(0,1fr) 276px;min-height:0}
@@ -79,7 +83,7 @@ button{cursor:pointer}
 .tab.active{color:#fff;border-bottom-color:var(--accent);background:rgba(59,130,246,.09)}
 .side-panel{display:none;flex:1;min-height:0;overflow-y:auto;padding:10px}
 .side-panel.active{display:block}
-.side-panel#panel-prop.active,#panel-list.active,#panel-check.active{display:flex;flex-direction:column}
+.side-panel#panel-prop.active,#panel-list.active{display:flex;flex-direction:column}
 .search-box{margin-bottom:10px}
 .search-box input{width:100%;height:34px;background:var(--bg);border:1px solid var(--line2);border-radius:7px;padding:0 10px;color:var(--text);font-size:12px}
 .search-box input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(59,130,246,.18)}
@@ -141,6 +145,7 @@ button{cursor:pointer}
 #canvas.tool-link{cursor:crosshair}
 #canvas.tool-place{cursor:copy}
 #canvas.tool-hand,#canvas.panning{cursor:grab}
+#canvas.tool-zone,#canvas.tool-anchor{cursor:crosshair}
 #canvas .node:hover .node-bg{stroke:#93b4f7}
 .canvas-hud{position:absolute;left:14px;bottom:14px;display:flex;flex-direction:column;gap:7px;pointer-events:none}
 .hud-zoom{display:flex;align-items:center;gap:2px;background:rgba(255,255,255,.94);border:1px solid #d8e0ec;border-radius:8px;box-shadow:0 3px 12px rgba(20,40,80,.12);pointer-events:auto;overflow:hidden}
@@ -190,34 +195,6 @@ button{cursor:pointer}
 .asset-table tbody tr{cursor:pointer}
 .asset-table tbody tr:hover{background:rgba(59,130,246,.12)}
 
-/* 合规自检 */
-.check-toolbar{display:flex;gap:6px;margin-bottom:12px}
-.check-toolbar select{flex:1;background:var(--bg);border:1px solid var(--line2);color:var(--text);border-radius:6px;padding:0 8px;height:30px}
-.check-toolbar .btn{flex:0 0 auto}
-.check-summary{display:grid;grid-template-columns:repeat(4,1fr);gap:6px;margin-bottom:12px}
-.check-summary>div{background:var(--panel2);border:1px solid rgba(34,197,94,.3);border-radius:8px;padding:9px 4px;text-align:center}
-.check-summary>div.warn{border-color:rgba(245,158,11,.4)}
-.check-summary>div.mute{border-color:var(--line)}
-.check-summary b{display:block;font-size:18px;color:var(--ok);line-height:1.2}
-.check-summary .warn b{color:var(--warn)}
-.check-summary .mute b{color:var(--muted)}
-.check-summary span{font-size:10px;color:var(--muted)}
-.check-note{font-size:10.5px;line-height:1.7;color:var(--dim);background:var(--panel2);border:1px solid var(--line);border-radius:7px;padding:9px 10px;margin-bottom:12px}
-.check-card{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--ok);border-radius:7px;padding:10px 11px;margin-bottom:9px}
-.check-card.miss{border-left-color:var(--warn)}
-.check-card.na{border-left-color:var(--dim);opacity:.75}
-.ck-head{display:flex;align-items:center;gap:8px;margin-bottom:6px}
-.ck-head strong{font-size:12px;color:var(--text)}
-.ck-badge{font-size:10px;padding:2px 6px;border-radius:4px;background:rgba(34,197,94,.16);color:#86efac;border:1px solid rgba(34,197,94,.3);white-space:nowrap}
-.check-card.miss .ck-badge{background:rgba(245,158,11,.16);color:#fcd34d;border-color:rgba(245,158,11,.3)}
-.check-card.na .ck-badge{background:rgba(148,163,184,.12);color:#94a3b8;border-color:rgba(148,163,184,.3)}
-.ck-clause{font-size:10px;color:var(--dim);margin-bottom:6px}
-.ck-detail,.ck-advice{font-size:11px;line-height:1.65;color:#c3cfe1;margin:0 0 4px;word-break:break-all}
-.ck-advice{color:#fcd34d}
-.ck-chips{display:flex;flex-wrap:wrap;gap:4px;margin-top:7px}
-.ck-chips button{font-size:10px;background:rgba(59,130,246,.14);border:1px solid rgba(59,130,246,.3);color:#bfdbfe;border-radius:4px;padding:2px 6px}
-.ck-chips button:hover{background:rgba(59,130,246,.3)}
-#panel-check{overflow-y:auto}
 
 /* ---------------- 状态栏 ---------------- */
 .statusbar{display:flex;align-items:center;gap:14px;background:#101724;border-top:1px solid var(--line);padding:0 14px;font-size:11px;color:var(--muted)}
@@ -267,6 +244,17 @@ button{cursor:pointer}
 .fld-section{border:1px solid var(--line);border-radius:8px;padding:10px;background:rgba(255,255,255,.015)}
 .fld-sec-hd{display:flex;justify-content:space-between;align-items:center;font-size:11px;font-weight:700;color:var(--accent2);margin-bottom:9px}
 .fld-sec-hd small{font-weight:400;color:var(--dim);font-size:10px}
+/* 区域标签九宫格位置选择 */
+.pos-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;max-width:170px}
+.pos-grid button{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--panel2);color:var(--txt);font-size:15px;line-height:1;transition:.12s}
+.pos-grid button:hover{border-color:var(--accent);background:rgba(59,130,246,.1)}
+.pos-grid button.active{border-color:var(--accent);background:var(--accent);color:#fff;box-shadow:0 2px 8px rgba(37,99,235,.35)}
+/* 选中对象四边快捷连线端口 */
+.port{transition:r .1s,fill .1s}
+.port:hover{r:7;fill:#dbeafe}
+/* 区域内空白背板：允许点击 / 连线命中 */
+.zone-hit{fill:transparent}
+.zone:hover .zone-hit{fill:rgba(148,163,184,.04)}
 .fld>span i{color:var(--danger);font-style:normal}
 .fld-err{display:none;font-size:10px;color:#fca5a5;font-style:normal}
 .fld.invalid .fld-err{display:block}
@@ -279,37 +267,6 @@ button{cursor:pointer}
 .batch-box label{display:flex;flex-direction:column;gap:3px;font-size:10.5px;color:var(--muted)}
 .batch-box input,.batch-box select{width:100%;background:var(--bg);border:1px solid var(--line2);border-radius:5px;color:var(--text);padding:5px 8px;font-size:11px;height:28px}
 .asset-table input[type=checkbox]{width:13px;height:13px;accent-color:var(--accent)}
-
-/* ---------------- v2：合规自检三视图 ---------------- */
-.check-views{display:flex;gap:4px;margin-bottom:10px}
-.check-views button{flex:1;background:var(--panel2);border:1px solid var(--line);color:var(--muted);border-radius:6px;padding:6px 2px;font-size:11px}
-.check-views button.active{background:rgba(59,130,246,.18);border-color:var(--accent);color:#bfdbfe}
-.check-summary>div.bad{border-color:rgba(239,68,68,.4)}
-.check-summary .bad b{color:#f87171}
-.check-card.review{border-left-color:var(--warn)}
-.check-card.review .ck-badge{background:rgba(245,158,11,.16);color:#fcd34d;border-color:rgba(245,158,11,.3)}
-.matrix-tip{font-size:10.5px;line-height:1.7;color:var(--dim);margin-bottom:10px}
-.matrix-card{background:var(--panel2);border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:9px}
-.mx-hd{display:flex;align-items:center;gap:7px;flex-wrap:wrap;margin-bottom:8px}
-.mx-hd strong{font-size:12px}
-.mx-hd small{font-size:10px;color:var(--dim);width:100%}
-.ck-badge.review{background:rgba(245,158,11,.16);color:#fcd34d;border-color:rgba(245,158,11,.3)}
-.ck-badge.miss{background:rgba(239,68,68,.14);color:#fca5a5;border-color:rgba(239,68,68,.3)}
-.ck-badge.na{background:rgba(148,163,184,.12);color:#94a3b8;border-color:rgba(148,163,184,.3)}
-.mx-table{width:100%;border-collapse:collapse;font-size:10.5px}
-.mx-table th{text-align:left;color:var(--dim);font-weight:400;padding:4px 5px;border-bottom:1px solid var(--line)}
-.mx-table td{padding:5px;color:#c3cfe1;border-bottom:1px solid var(--line);max-width:90px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
-.mx-table tr[data-locate]{cursor:pointer}
-.mx-table tr[data-locate]:hover{background:rgba(59,130,246,.12)}
-.mx-empty{font-size:10.5px;color:var(--dim)}
-.bd-hd{font-size:11.5px;font-weight:700;color:var(--accent2);margin:14px 0 7px}
-.bd-card{background:var(--panel2);border:1px solid var(--line);border-left:3px solid var(--ok);border-radius:7px;padding:9px 10px;margin-bottom:7px}
-.bd-card.warn{border-left-color:var(--warn)}
-.bd-card b{font-size:11.5px;color:var(--text)}
-.bd-card span{float:right;font-size:10px;color:var(--dim)}
-.bd-card p{font-size:10.5px;color:#c3cfe1;margin:5px 0;line-height:1.6;word-break:break-all}
-.bd-card em{display:block;font-size:10px;color:var(--dim);font-style:normal;margin-top:3px}
-.bd-card em.warn{color:#fcd34d}
 
 /* ---------------- v2：工程面板 ---------------- */
 .proj-section{border:1px solid var(--line);border-radius:8px;padding:10px;margin-bottom:10px;background:var(--panel2)}

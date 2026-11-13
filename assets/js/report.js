@@ -83,50 +83,6 @@
     return out;
   }
 
-  /* 合规自检文本报告 */
-  function reportText(S, analysis, meta) {
-    const L = ['', '一级', '二级', '三级', '四级'][analysis.level] || (analysis.level + '级');
-    const lines = [
-      '网络安全等级保护拓扑合规自检报告',
-      '项目名称：' + (meta && meta.name || '未命名拓扑'),
-      '等保级别：' + L,
-      '图号：' + (meta && meta.docNo || ''),
-      '生成时间：' + new Date().toLocaleString('zh-CN'),
-      '',
-      '一、自检汇总',
-      '  符合 ' + analysis.counts.ok + ' 项 / 待人工核实 ' + analysis.counts.review + ' 项 / 待核查（缺失）' +
-        analysis.counts.miss + ' 项 / 不适用 ' + analysis.counts.na + ' 项，共 ' + analysis.counts.total + ' 个检查项',
-      ''
-    ];
-    lines.push('二、检查项明细');
-    analysis.checks.forEach(function (c, i) {
-      const badge = { ok: '符合', review: '待人工核实', miss: '待核查', na: '不适用' }[c.status];
-      lines.push('  ' + (i + 1) + '. [' + badge + '] ' + c.title);
-      lines.push('     依据：' + c.clause + '（' + c.levelLabel + '）');
-      lines.push('     ' + c.detail);
-      if (c.status === 'miss') lines.push('     建议：' + c.advice);
-      if (c.hits.length) lines.push('     关联资产：' + c.hits.map(function (n) { return n.label; }).join('、'));
-      lines.push('');
-    });
-    lines.push('三、边界链路识别（共 ' + analysis.boundaries.length + ' 条）');
-    analysis.boundaries.forEach(function (b, i) {
-      lines.push('  ' + (i + 1) + '. [' + b.type + '] ' + b.za + ' → ' + b.zb + '：' + b.from + ' → ' + b.to +
-        (b.hasFirewall ? '' : '（未见边界访问控制设备）'));
-    });
-    lines.push('');
-    lines.push('四、外部到数据资产可达路径（共 ' + analysis.paths.length + ' 条）');
-    analysis.paths.forEach(function (p, i) {
-      lines.push('  ' + (i + 1) + '. ' + p.from + ' → ' + p.to + '（' + p.length + ' 跳）：' + p.names.join(' → '));
-      if (p.advice) lines.push('     提示：' + p.advice);
-    });
-    lines.push('');
-    lines.push('五、资产概况');
-    lines.push('  资产 ' + S.nodes.length + ' 个，链路 ' + S.links.length + ' 条，安全区域 ' + S.zones.length + ' 个');
-    lines.push('');
-    lines.push('说明：本报告由拓扑图静态分析生成，仅作为测评准备与现场核查线索，不能替代配置检查、渗透验证与人工判定。');
-    return lines.join('\r\n');
-  }
-
   /* 整改前后差异文本 */
   function diffText(d) {
     const lines = [
@@ -154,6 +110,6 @@
 
   window.TopoReport = {
     legendData: legendData, frameSVG: frameSVG,
-    reportText: reportText, diffText: diffText
+diffText: diffText
   };
 })();
