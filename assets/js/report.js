@@ -19,11 +19,16 @@
       if (ICONS.textIds.indexOf(n.icon) >= 0) return;
       used[n.icon] = (used[n.icon] || 0) + 1;
     });
-    return ICONS.categories.map(function (c) {
+    const groups = ICONS.categories.map(function (c) {
       const items = Object.keys(used).filter(function (id) { return ICONS.map[id] && ICONS.map[id].cat === c.id; })
         .map(function (id) { return { id: id, name: ICONS.map[id].name, sub: ICONS.map[id].sub, count: used[id] }; });
       return { cat: c, items: items };
     }).filter(function (g) { return g.items.length; });
+    /* 自定义 SVG 图标属于 custom 类，不在内置大类列表中，须单列一组，否则报告图例会漏掉它们 */
+    const custom = Object.keys(used).filter(function (id) { return ICONS.map[id] && ICONS.map[id].cat === 'custom'; })
+      .map(function (id) { return { id: id, name: ICONS.map[id].name, sub: '自定义', count: used[id] }; });
+    if (custom.length) groups.push({ cat: { id: 'custom', name: '自定义设备', color: '#a78bfa' }, items: custom });
+    return groups;
   }
 
   function metaLine(meta) {
@@ -104,7 +109,9 @@
     });
     lines.push('');
     lines.push('四、结构变化');
-    lines.push('  连线增减：' + (d.linkDelta >= 0 ? '+' : '') + d.linkDelta + '　安全区域增减：' + (d.zoneDelta >= 0 ? '+' : '') + d.zoneDelta);
+    lines.push('  连线增减：' + (d.linkDelta >= 0 ? '+' : '') + d.linkDelta +
+      '　安全区域增减：' + (d.zoneDelta >= 0 ? '+' : '') + d.zoneDelta +
+      '　连接点增减：' + (d.anchorDelta >= 0 ? '+' : '') + (d.anchorDelta || 0));
     return lines.join('\r\n');
   }
 
