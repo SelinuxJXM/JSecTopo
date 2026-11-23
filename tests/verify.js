@@ -9,7 +9,7 @@ const vm = require('vm');
 const path = require('path');
 const ROOT = path.join(__dirname, '..');
 const FILES = ['assets/js/icons.js', 'assets/js/schema.js', 'assets/js/templates.js',
-  'assets/js/report.js', 'assets/js/app.js'];
+  'assets/js/report.js', 'assets/js/image-io.js', 'assets/js/app.js'];
 
 class El {
   constructor(id) {
@@ -72,6 +72,53 @@ function createApp(preset, extraStore) {
       return [];
     }
   };
+  /* 让导出清理逻辑可测：canvas 克隆体暴露图层 HTML，并按真实 DOM 语义摘除 / 保留节点 */
+  const canvasEl = document.getElementById('canvas');
+  canvasEl.cloneNode = function () {
+    const c = new El('canvas-clone');
+    c._html = '<svg>' + ['layer-zones', 'layer-links', 'layer-nodes', 'layer-overlay']
+      .map(id => els[id] ? els[id].innerHTML : '').join('') + '</svg>';
+    c.querySelectorAll = function (sel) {
+      /* 导出线宽复位逻辑可测：按真实 DOM 语义把 data-base-width 写回 stroke-width */
+      if (sel.indexOf('data-base-width') >= 0) {
+        const out = [], re = /<[^>]*\sdata-base-width="([^"]+)"[^>]*>/g;
+        let m;
+        while ((m = re.exec(c._html))) {
+          let frag = m[0];
+          const base = m[1];
+          const e = new El();
+          e.getAttribute = k => k === 'data-base-width' ? base
+            : (k === 'stroke-width' ? ((frag.match(/\sstroke-width="([^"]*)"/) || [])[1] || null) : null);
+          e.setAttribute = function (k, v) {
+            if (k === 'stroke-width') {
+              const next = frag.replace(/(\sstroke-width=")[^"]*(")/, '$1' + v + '$2');
+              c._html = c._html.split(frag).join(next); frag = next;
+            }
+          };
+          out.push(e);
+        }
+        return out;
+      }
+      if (sel.indexOf('data-handle') < 0) return [];
+      const html = c._html, out = [], re = /<[^>]*\sdata-handle="([^"]+)"[^>]*>/g;
+      let m;
+      while ((m = re.exec(html))) {
+        let frag = m[0];
+        const e = new El();
+        e.setAttribute('data-handle', m[1]);
+        e.remove = function () { c._html = c._html.split(frag).join(''); };
+        e.removeAttribute = function (k) {
+          delete e._attrs[k];
+          const next = frag.replace(new RegExp('\\s' + k + '="[^"]*"'), '');
+          c._html = c._html.replace(frag, next);
+          frag = next;
+        };
+        out.push(e);
+      }
+      return out;
+    };
+    return c;
+  };
   const sandbox = {
     window: {
       addEventListener(t, f) { (winListeners[t] || (winListeners[t] = [])).push(f); },
@@ -84,17 +131,30 @@ function createApp(preset, extraStore) {
     },
     console, setTimeout, clearTimeout, Date, JSON, Math, Set, Map, RegExp, Error,
     parseInt, parseFloat, isNaN, Infinity, Promise,
+    btoa, atob, TextEncoder, TextDecoder, Uint8Array, Uint32Array, ArrayBuffer,
     navigator: { clipboard: { writeText: () => Promise.resolve() } },
     confirm: () => true, prompt: () => '重命名后的项目', alert: m => alerts.push(String(m)),
-    Blob: class { constructor(p) { this.parts = p; lastBlob = this; } },
+    Blob: class {
+      constructor(p) { this.parts = p; lastBlob = this; }
+      arrayBuffer() {
+        const f = this.parts[0];
+        if (f instanceof ArrayBuffer) return Promise.resolve(f);
+        if (f instanceof Uint8Array) return Promise.resolve(f.buffer);
+        return Promise.resolve(new Uint8Array(0).buffer);
+      }
+    },
     URL: {
       createObjectURL: b => { lastUrlBlob = b; return 'blob:fake'; },
       revokeObjectURL() {}
     },
-    XMLSerializer: class { serializeToString() { return '<svg/>'; } },
+    XMLSerializer: class { serializeToString(node) { return node && node._html ? node._html : '<svg/>'; } },
     Image: class {},
     FileReader: class {
       readAsText(file) { this.result = file._content || ''; if (this.onload) this.onload(); }
+      readAsArrayBuffer(file) {
+        this.result = file._buffer || new Uint8Array(0).buffer;
+        if (this.onload) this.onload();
+      }
     }
   };
   vm.createContext(sandbox);
@@ -500,6 +560,450 @@ t('数据模型 v4：区域标签九宫格 / 连接点 / 端点迁移', () => {
 /* 以下交互用例各自使用干净工程实例，避免依赖测试顺序对全局画布状态的累积 */
 function ptrFires(B, target, x, y) { B.svgFire('pointerdown', { button: 0, clientX: x, clientY: y, target: target, shiftKey: false, altKey: false, preventDefault() {}, stopPropagation() {} }); }
 function pupFires(B) { B.winFire('pointerup', { clientX: 0, clientY: 0, target: {}, preventDefault() {} }); }
+function pmoveFires(B, x, y) { B.winFire('pointermove', { clientX: x, clientY: y, target: {}, preventDefault() {} }); }
+
+/* ---------- C2. 本次细节优化回归 ---------- */
+t('区域归属：拖入已带旧区域名的资产时 parent 与 zone 同步刷新', () => {
+  const dirty = JSON.parse(JSON.stringify(PROJ));
+  dirty.nodes[2].zone = '旧业务区';
+  const C = createApp(dirty);
+  ptrFires(C, ptrTarget('n3', 'node', null), 650, 150);
+  pmoveFires(C, 300, 150); pupFires(C);
+  const p = C.els['panel-prop'].innerHTML;
+  if (!p.includes('value="DMZ区"')) throw new Error('zone 文本未同步为新区域：' + p.slice(0, 240));
+  if (p.includes('旧业务区')) throw new Error('旧区域名未清除');
+});
+t('区域归属：区域改名后区域内资产的所属安全区域同步更新', () => {
+  const C = createApp(PROJ);
+  C.svgFire('dblclick', { target: ptrTarget('z1', 'zone', null), preventDefault() {}, stopPropagation() {} });
+  const ed = C.els['inline-editor'];
+  ed.value = '核心业务区';
+  (ed.listeners.keydown || [])[0]({ key: 'Enter', preventDefault() {} });
+  ptrFires(C, ptrTarget('n1', 'node', null), 150, 150); pupFires(C);
+  const p = C.els['panel-prop'].innerHTML;
+  if (!p.includes('value="核心业务区"')) throw new Error('区域改名未同步到资产 zone：' + p.slice(0, 240));
+});
+t('区域归属：移出区域 / 删除区域时清空所属区域文本', () => {
+  const C = createApp(PROJ);
+  ptrFires(C, ptrTarget('n1', 'node', null), 150, 150);
+  pmoveFires(C, 700, 400); pupFires(C);
+  ptrFires(C, ptrTarget('n1', 'node', null), 700, 400); pupFires(C);
+  if (!C.els['panel-prop'].innerHTML.includes('value=""')) throw new Error('移出区域后 zone 文本未清空');
+  const D = createApp(PROJ);
+  ptrFires(D, ptrTarget('z1', 'zone', null), 100, 70); pupFires(D);
+  D.fire('context-menu', 'click', fake('data-act', 'delete'));
+  if (D.G('layer-zones').includes('DMZ区')) throw new Error('区域未删除');
+  const csvBtn = D.qsa().export.find(b => b.getAttribute('data-export') === 'csv');
+  csvBtn.onclick();
+  const txt = String((D.blob() && D.blob().parts[0]) || '');
+  if (txt.includes('DMZ区')) throw new Error('删除区域后资产仍残留旧区域名');
+});
+t('导出：PNG/SVG 保留安全区域名称，仅摘除交互手柄', () => {
+  const C = createApp(PROJ);
+  ptrFires(C, ptrTarget('n1', 'node', null), 150, 150); pupFires(C);
+  const btn = C.qsa().export.find(b => b.getAttribute('data-export') === 'svg');
+  btn.onclick();
+  const txt = String((C.blob() && C.blob().parts[0]) || '');
+  if (!txt.includes('DMZ区')) throw new Error('导出 SVG 丢失安全区域名称');
+  if (!txt.includes('class="zone-label"')) throw new Error('区域名文本元素被误删');
+  if (txt.includes('data-handle="zone-label"')) throw new Error('导出仍带标签交互标记');
+  if (txt.includes('data-handle="port"')) throw new Error('端口手柄未从导出中移除');
+});
+t('走线拐点：bend 字段向后兼容，拖动写入且可重置', () => {
+  const Sch = M.window.TopoSchema;
+  const a = Sch.normalize({ version: 4, nodes: [{ id: 'a' }, { id: 'b' }],
+    links: [{ id: 'l', from: 'a', to: 'b', bend: 320 }] });
+  if (a.links[0].bend !== 320) throw new Error('bend 未保留');
+  const b = Sch.normalize({ version: 4, nodes: [{ id: 'a' }, { id: 'b' }], links: [{ id: 'l', from: 'a', to: 'b' }] });
+  if (b.links[0].bend !== null) throw new Error('旧连线未补 bend 默认值');
+  const C = createApp(PROJ);
+  ptrFires(C, ptrTarget('l1', 'link', null), 250, 150); pupFires(C);
+  if (!C.count(C.G('layer-links'), /data-handle="waypoint"/g)) throw new Error('选中正交连线未显示走线控制点');
+  ptrFires(C, ptrTarget('l1', 'link', 'waypoint'), 250, 150);
+  pmoveFires(C, 380, 150); pupFires(C);
+  if (!C.G('layer-links').includes('380 143')) throw new Error('拖动拐点未改变走线路径');
+  C.fire('panel-prop', 'click', fake('data-act', 'reset-bend'));
+  if (C.G('layer-links').includes('380 143')) throw new Error('重置走线未生效');
+});
+t('连线预览：拖拽时按当前线型生成折线并吸附目标', () => {
+  const C = createApp(PROJ);
+  C.click('btn-link');
+  ptrFires(C, ptrTarget('n1', 'node', null), 150, 150);
+  pmoveFires(C, 600, 400);
+  const d = (C.G('layer-overlay').match(/<path d="([^"]+)"/) || [])[1] || '';
+  if (!d.includes(' L')) throw new Error('预览仍为中心直线：' + d);
+  C.winFire('keydown', { key: 'Escape', target: { tagName: 'BODY' }, preventDefault() {} });
+});
+t('悬停端口：未选中时悬停即显示可拉线端口', () => {
+  const C = createApp(PROJ);
+  if (C.count(C.G('layer-overlay'), /hover-port/g)) throw new Error('初始不应有悬停端口');
+  pmoveFires(C, 150, 150);
+  const ov = C.G('layer-overlay');
+  if (!ov.includes('hover-port')) throw new Error('悬停资产未显示端口');
+  if (!ov.includes('data-handle="port"')) throw new Error('悬停端口不可直接拉线');
+});
+t('连线取消：空白处起线后按 Esc 不残留孤立连接点', () => {
+  const C = createApp(PROJ);
+  const count = () => C.count(C.G('layer-nodes'), /class="anchor"/g);
+  C.click('btn-link');
+  ptrFires(C, ptrTarget(null, null, null), 900, 500);
+  if (count() !== 0) throw new Error('起线阶段就落盘了连接点');
+  C.winFire('keydown', { key: 'Escape', target: { tagName: 'BODY' }, preventDefault() {} });
+  if (count() !== 0) throw new Error('Esc 取消后残留孤立连接点');
+});
+
+/* ---------- C3. 全面细节复查回归 ---------- */
+t('归属推断：嵌套区域命中内层，且保留无对应框的自由区域名', () => {
+  const Sch = M.window.TopoSchema;
+  const nested = Sch.normalize({
+    version: 4,
+    nodes: [{ id: 'n', icon: 'web', x: 90, y: 90, label: '内层资产' }],
+    zones: [
+      { id: 'outer', x: 0, y: 0, w: 400, h: 400, label: '外层区' },
+      { id: 'inner', x: 60, y: 60, w: 160, h: 160, label: '内层区' }
+    ]
+  });
+  if (nested.nodes[0].parent !== 'inner' || nested.nodes[0].zone !== '内层区') {
+    throw new Error('嵌套区域未归属最内层：' + JSON.stringify(nested.nodes[0]));
+  }
+  const free = Sch.normalize({
+    version: 4,
+    nodes: [{ id: 'n2', icon: 'router', x: 10, y: 10, label: '出口路由器', zone: '网络边界' }],
+    zones: [{ id: 'z', x: 300, y: 300, w: 200, h: 200, label: 'DMZ区' }]
+  });
+  if (free.nodes[0].zone !== '网络边界' || free.nodes[0].parent) throw new Error('自由区域名被位置推断擦除');
+  const same = Sch.normalize({
+    version: 4,
+    nodes: [{ id: 'n3', icon: 'web', x: 10, y: 10, label: 'Web', zone: 'DMZ区' }],
+    zones: [{ id: 'z2', x: 0, y: 0, w: 200, h: 200, label: 'DMZ区' }]
+  });
+  if (same.nodes[0].parent !== 'z2') throw new Error('同名区域未建立归属');
+});
+t('嵌套区域：拖动落入内层区域时归属.inner 而非外层大框', () => {
+  const NEST = {
+    version: 4,
+    nodes: [{ id: 'nn', icon: 'web', x: 600, y: 600, w: 108, h: 86, label: '待移动资产', parent: '', zone: '' }],
+    zones: [
+      { id: 'out', x: 0, y: 0, w: 500, h: 500, label: '外层区' },
+      { id: 'in', x: 200, y: 200, w: 160, h: 160, label: '内层区' }
+    ],
+    links: [], notes: [], meta: { name: '嵌套测试' },
+    view: { x: 0, y: 0, zoom: 1 }, settings: { grid: true, snap: false, minimap: true, readonly: false }
+  };
+  const C = createApp(NEST);
+  ptrFires(C, ptrTarget('nn', 'node', null), 650, 640);
+  pmoveFires(C, 250, 250); pupFires(C);
+  const p = C.els['panel-prop'].innerHTML;
+  if (!p.includes('value="内层区"')) throw new Error('拖动后归属了外层区：' + p.slice(0, 240));
+});
+t('区域改名：input 阶段即同步资产字段，不依赖 change 事件', () => {
+  const C = createApp(PROJ);
+  ptrFires(C, ptrTarget('z1', 'zone', null), 100, 70); pupFires(C);
+  C.fire('panel-prop', 'input', {
+    getAttribute: () => 'label', tagName: 'TEXTAREA', type: 'textarea', value: '即时改名区',
+    hasAttribute: () => false, closest: () => null
+  });
+  ptrFires(C, ptrTarget('n1', 'node', null), 150, 150); pupFires(C);
+  if (!C.els['panel-prop'].innerHTML.includes('value="即时改名区"')) {
+    throw new Error('未提交 change 时资产字段未同步：' + C.els['panel-prop'].innerHTML.slice(0, 240));
+  }
+});
+t('内联编辑：改为多行输入，Shift+Enter 换行而非提交', () => {
+  const html = fs.readFileSync(path.join(ROOT, 'index.html'), 'utf8');
+  if (!/<textarea id="inline-editor"/.test(html)) throw new Error('内联编辑器仍为单行 input');
+  const C = createApp(PROJ);
+  C.svgFire('dblclick', { target: ptrTarget('n1', 'node', null), preventDefault() {}, stopPropagation() {} });
+  const ed = C.els['inline-editor'];
+  ed.value = '第一行\n第二行';
+  (ed.listeners.keydown || [])[0]({ key: 'Enter', shiftKey: true, preventDefault() {} });
+  if (ed.style.display !== 'block') throw new Error('Shift+Enter 被误判为提交');
+  (ed.listeners.keydown || [])[0]({ key: 'Enter', preventDefault() {} });
+  if (!C.G('layer-nodes').includes('第二行')) throw new Error('多行名称未写回画布');
+});
+t('报告图例：自定义 SVG 图标单列一组，不再漏项', () => {
+  const cp = JSON.parse(JSON.stringify(PROJ));
+  cp.nodes.push({ id: 'nc', icon: 'custom_x1', x: 800, y: 100, w: 108, h: 86, label: '单位专用设备' });
+  const C = createApp(cp, {
+    'dengbao-topo-custom-v2': JSON.stringify([{ id: 'custom_x1', name: '单位专用设备', body: '<rect x="2" y="2" width="44" height="44"/>' }])
+  });
+  const btn = C.qsa().export.find(b => b.getAttribute('data-export') === 'framed-svg');
+  btn.onclick();
+  const txt = String((C.blob() && C.blob().parts[0]) || '');
+  if (!txt.includes('自定义设备') || !txt.includes('单位专用设备')) throw new Error('报告图例漏掉自定义图标');
+});
+t('差异清单：结构变化包含连接点增减', () => {
+  const R = M.window.TopoReport;
+  const txt = R.diffText({ summary: '测试', added: [], removed: [], changed: [], linkDelta: 0, zoneDelta: 0, anchorDelta: 2 });
+  if (!txt.includes('连接点增减：+2')) throw new Error('差异清单未输出连接点变化');
+});
+t('页面切换：未提交的连线草稿被清空，不跨页成线', () => {
+  const C = createApp(PROJ);
+  C.click('btn-link');
+  ptrFires(C, ptrTarget('n1', 'node', null), 150, 150);
+  if (!C.G('layer-overlay').includes('stroke-dasharray="7 5"')) throw new Error('连线草稿未生成');
+  const add = new El();
+  add.closest = sel => (sel === '#btn-add-page' ? add : null);
+  add.getAttribute = () => null;
+  C.fire('page-tabs', 'click', add);
+  if (C.G('layer-overlay').includes('stroke-dasharray="7 5"')) throw new Error('切换页面后连线草稿仍残留');
+  if (C.count(C.G('layer-links'), /class="link"/g) !== 0) throw new Error('新页面出现跨页孤儿连线');
+});
+t('CSS：无未定义变量引用（--txt 已修正）', () => {
+  const css = fs.readFileSync(path.join(ROOT, 'assets/css/style.css'), 'utf8');
+  if (/var\(--txt\)/.test(css)) throw new Error('仍引用未定义变量 --txt');
+  if (!/var\(--text\)/.test(css)) throw new Error('文本色变量缺失');
+});
+t('精简：三个死字段已从默认值移除，旧工程携带时仍可兼容导入', () => {
+  const S = M.window.TopoSchema;
+  if ('shape' in S.ANCHOR_DEFAULTS) throw new Error('连接点 shape 死字段仍存在');
+  if ('labelAlign' in S.ZONE_DEFAULTS) throw new Error('区域 labelAlign 死字段仍存在');
+  if ('level' in S.META_DEFAULTS) throw new Error('元数据 level 死字段仍存在');
+  /* 旧工程即使带有这三个字段，normalize 也应原样保留其余结构、不影响导入 */
+  const old = S.normalize({
+    nodes: [], zones: [{ id: 'z1', label: '区', labelAlign: 'end' }],
+    anchors: [{ id: 'a1', shape: 'square' }],
+    meta: { name: '老工程', level: '二级' }
+  });
+  if (old.zones[0].label !== '区' || old.anchors[0].label !== '连接点') throw new Error('旧字段导致导入结构异常');
+  if (old.meta.name !== '老工程') throw new Error('旧工程元数据丢失');
+});
+
+/* ---------- C3. 第三轮细节审查回归 ---------- */
+function exportJSON(C) {
+  C.qsa().export.find(b => b.getAttribute('data-export') === 'json').onclick();
+  return JSON.parse(String(C.blob().parts[0]));
+}
+t('schema：撤销恢复不重跑归属推断，异常视图参数自动兜底', () => {
+  const S = M.window.TopoSchema;
+  const base = { nodes: [{ id: 'n', icon: 'web', x: 10, y: 10, label: 'N', parent: '', zone: '' }],
+    zones: [{ id: 'z', x: 0, y: 0, w: 200, h: 200, label: 'DMZ' }] };
+  if (S.normalize(base).nodes[0].parent !== 'z') throw new Error('导入期应推断归属');
+  const restored = S.normalize(base, { inferParent: false });
+  if (restored.nodes[0].parent !== '' || restored.nodes[0].zone !== '') throw new Error('快照恢复被重新推断归属');
+  const v = S.sanitizeView({ x: 'abc', y: 20, zoom: 'abc' });
+  if (v.x !== 60 || v.y !== 20 || v.zoom !== 1) throw new Error('视图异常值未兜底：' + JSON.stringify(v));
+  if (S.sanitizeView({ x: 0, y: 0, zoom: 99 }).zoom !== 3) throw new Error('缩放上限失效');
+});
+t('只读模式：属性面板输入与勾选都不能改写数据', () => {
+  const C = createApp(PROJ);
+  C.click('btn-readonly');
+  ptrFires(C, ptrTarget('n1', 'node', null), 150, 150); pupFires(C);
+  const before = C.G('layer-nodes');
+  const fld = fake('data-field', 'label'); fld.tagName = 'INPUT'; fld.type = 'text'; fld.value = '只读篡改'; fld.closest = () => null;
+  C.fire('panel-prop', 'input', fld);
+  const chk = fake('data-field', 'locked'); chk.type = 'checkbox'; chk.checked = true;
+  C.fire('panel-prop', 'change', chk);
+  if (C.G('layer-nodes') !== before) throw new Error('只读模式下属性面板仍改写数据');
+});
+t('复制：区域与内部资产一起复制时归属指向新区域', () => {
+  const C = createApp(PROJ);
+  const before = exportJSON(C);
+  const z0 = before.zones[0].id;
+  const down = (id, kind, shift) => C.svgFire('pointerdown', { button: 0, clientX: 150, clientY: 150,
+    target: ptrTarget(id, kind, null), shiftKey: !!shift, altKey: false, preventDefault() {}, stopPropagation() {} });
+  down('n1', 'node', false); pupFires(C);
+  down('z1', 'zone', true); pupFires(C);
+  C.click('btn-duplicate');
+  const after = exportJSON(C);
+  if (after.zones.length !== 2) throw new Error('区域未被复制');
+  const zNew = after.zones.find(z => z.id !== z0);
+  const copies = after.nodes.filter(n => n.parent === zNew.id && n.id !== 'n1');
+  if (!copies.length) throw new Error('复制出的资产仍归属原区域');
+  if (copies.some(n => n.zone !== zNew.label)) throw new Error('复制出的区域名未同步');
+});
+t('导出：连线线宽不受选中状态影响', () => {
+  const C = createApp(PROJ);
+  const svg = () => { C.qsa().export.find(b => b.getAttribute('data-export') === 'svg').onclick(); return String(C.blob().parts[0]); };
+  const plain = svg();
+  ptrFires(C, ptrTarget('l1', 'link', null), 250, 150); pupFires(C);
+  const selected = svg();
+  if (!plain.includes('data-base-width="2"')) throw new Error('连线未记录基础线宽');
+  if (selected.includes('stroke-width="3.5"')) throw new Error('选中连线的加粗线宽被带进导出');
+});
+t('属性面板：未结算编辑不会污染下一次撤销', () => {
+  const C = createApp(PROJ);
+  ptrFires(C, ptrTarget('n2', 'node', null), 350, 150); pupFires(C);
+  const fld = fake('data-field', 'label'); fld.tagName = 'INPUT'; fld.type = 'text'; fld.value = '临时改名'; fld.closest = () => null;
+  C.fire('panel-prop', 'input', fld);
+  if (exportJSON(C).nodes.find(n => n.id === 'n2').label !== '临时改名') throw new Error('输入未实时生效');
+  ptrFires(C, ptrTarget('n3', 'node', null), 650, 150); pupFires(C);
+  const chk = fake('data-field', 'locked'); chk.type = 'checkbox'; chk.checked = true;
+  C.fire('panel-prop', 'change', chk);
+  C.click('btn-undo');
+  if (exportJSON(C).nodes.find(n => n.id === 'n2').label !== '临时改名') throw new Error('撤销回退了无关的历史编辑');
+});
+
+/* ---------- C4. 人机交互回归 ---------- */
+t('快捷键：Esc 仅关闭弹窗，不清空画布选中集', () => {
+  const C = createApp(PROJ);
+  ptrFires(C, ptrTarget('n1', 'node', null), 150, 150); pupFires(C);
+  if (!C.G('panel-prop').includes('边界防火墙')) throw new Error('前置选中失败');
+  C.click('btn-help');
+  if (!C.els['help-modal'].classList.contains('show')) throw new Error('帮助弹窗未打开');
+  C.winFire('keydown', { key: 'Escape', target: { tagName: 'BODY' }, preventDefault() {}, stopPropagation() {} });
+  if (C.els['help-modal'].classList.contains('show')) throw new Error('帮助弹窗未关闭');
+  if (!C.G('panel-prop').includes('边界防火墙')) throw new Error('关闭弹窗时误清空选中集');
+  C.winFire('keydown', { key: 'Escape', target: { tagName: 'BODY' }, preventDefault() {}, stopPropagation() {} });
+  if (C.G('panel-prop').includes('边界防火墙')) throw new Error('无弹窗时 Esc 应清空选中集');
+});
+t('交互：右键菜单贴近视口边缘时自动钳制', () => {
+  const C = createApp(PROJ);
+  C.svgFire('contextmenu', { clientX: 1190, clientY: 790, target: ptrTarget('n1', 'node', null), preventDefault() {} });
+  if (!C.els['context-menu'].classList.contains('show')) throw new Error('右键菜单未打开');
+  const left = parseFloat(C.els['context-menu'].style.left), top = parseFloat(C.els['context-menu'].style.top);
+  if (left > 1200 - 186 - 4 || top > 800 - 360 - 4) throw new Error('菜单溢出视口：' + left + ',' + top);
+});
+t('交互：边缘对象就地编辑框不超出视口', () => {
+  const edge = JSON.parse(JSON.stringify(PROJ));
+  edge.nodes[0].x = 1150; edge.nodes[0].y = 760;
+  const C = createApp(edge);
+  ptrFires(C, ptrTarget('n1', 'node', null), 1160, 770); pupFires(C);
+  C.svgFire('dblclick', { target: ptrTarget('n1', 'node', null), preventDefault() {} });
+  const ed = C.els['inline-editor'];
+  if (ed.style.display !== 'block') throw new Error('就地编辑框未打开');
+  if (parseFloat(ed.style.left) > 1200 - 120 - 4 || parseFloat(ed.style.top) > 800 - 34 - 4) {
+    throw new Error('编辑框溢出视口：' + ed.style.left + ',' + ed.style.top);
+  }
+});
+t('交互：Ctrl 点选图标进入连续放置，Esc 退出', () => {
+  const C = createApp(PROJ);
+  const n0 = C.count(C.G('layer-nodes'), /data-id=/g);
+  const item = new El(); item.getAttribute = k => (k === 'data-icon' ? 'web' : null);
+  const target = new El(); target.closest = s => (s === '.group-hd' ? null : item);
+  C.els['asset-grid'].listeners.click[0]({ target: target, ctrlKey: true, preventDefault() {}, stopPropagation() {} });
+  if (!C.els['hint-text'].textContent.includes('连续放置')) throw new Error('未进入连续放置模式');
+  ptrFires(C, ptrTarget('', '', null), 800, 400); pupFires(C);
+  ptrFires(C, ptrTarget('', '', null), 900, 400); pupFires(C);
+  if (C.count(C.G('layer-nodes'), /data-id=/g) !== n0 + 2) throw new Error('连续放置未放满两个资产');
+  C.winFire('keydown', { key: 'Escape', target: { tagName: 'BODY' }, preventDefault() {}, stopPropagation() {} });
+  if (C.els['hint-text'].textContent.includes('连续放置')) throw new Error('Esc 未退出连续放置');
+});
+t('画布资产悬停提示含名称 / IP / 所属区域', () => {
+  const C = createApp(PROJ);
+  const html = C.G('layer-nodes');
+  if (!html.includes('<title>边界防火墙 · 10.0.0.1 · DMZ区</title>')) throw new Error('节点缺少完整悬停提示');
+});
+t('初始化：本地工程的异常 view 参数同样兜底', () => {
+  const bad = JSON.parse(JSON.stringify(PROJ));
+  bad.view = { x: 0, y: 0, zoom: 'abc' };
+  const C = createApp(bad);
+  const t = C.els['viewport'].getAttribute('transform') || '';
+  if (/scale\(abc\)|scale\(NaN\)/.test(t)) throw new Error('启动视图未兜底：' + t);
+});
+
+/* ---------- C5. 图片往返与画布查找 ---------- */
+function localCrc32(buf) {
+  let c = 0xFFFFFFFF;
+  for (const b of buf) {
+    c ^= b;
+    for (let k = 0; k < 8; k++) c = (c >>> 1) ^ (0xEDB88320 & -(c & 1));
+  }
+  return (c ^ 0xFFFFFFFF) >>> 0;
+}
+function pngChunk(type, data) {
+  const t = Buffer.from(type, 'ascii'), body = Buffer.concat([t, data]);
+  const len = Buffer.alloc(4); len.writeUInt32BE(data.length, 0);
+  const crc = Buffer.alloc(4); crc.writeUInt32BE(localCrc32(body), 0);
+  return Buffer.concat([len, body, crc]);
+}
+function minimalPNG() {
+  const sig = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+  const ihdr = Buffer.alloc(13);
+  ihdr.writeUInt32BE(1, 0); ihdr.writeUInt32BE(1, 4); ihdr[8] = 8; ihdr[9] = 6;
+  const idat = require('zlib').deflateSync(Buffer.from([0, 255, 255, 255]));
+  return Buffer.concat([sig, pngChunk('IHDR', ihdr), pngChunk('IDAT', idat), pngChunk('IEND', Buffer.alloc(0))]);
+}
+t('图片往返：SVG / 报告版式 SVG 内嵌完整工程元数据', () => {
+  const IO = M.window.TopoImageIO;
+  const C = createApp(PROJ);
+  ['svg', 'framed-svg'].forEach(function (kind) {
+    C.qsa().export.find(b => b.getAttribute('data-export') === kind).onclick();
+    const xml = String(C.blob().parts[0]);
+    const p = IO.extractSvgMeta(xml);
+    if (!p) throw new Error(kind + ' 未写入工程元数据');
+    if (p.nodes.length !== 3 || p.nodes[0].zone !== 'DMZ区' || p.links.length !== 2) {
+      throw new Error(kind + ' 元数据字段丢失');
+    }
+  });
+});
+t('图片往返：PNG tEXt 块写入并还原完整工程', () => {
+  const IO = M.window.TopoImageIO;
+  const src = new Uint8Array(minimalPNG());
+  const withMeta = IO.injectPngMeta(src, PROJ);
+  if (!withMeta || withMeta.length <= src.length) throw new Error('PNG 元数据未写入');
+  const back = IO.extractPngMeta(withMeta);
+  if (!back) throw new Error('PNG 元数据读取失败（CRC 或分块结构异常）');
+  if (back.nodes.length !== 3 || back.zones[0].label !== 'DMZ区' || back.nodes[1].parent !== 'z1') {
+    throw new Error('PNG 往返后业务字段丢失');
+  }
+  if (IO.extractPngMeta(src)) throw new Error('无元数据的 PNG 被误判为可编辑');
+  /* 校验写入块的 CRC 与标准算法一致，确保外部 PNG 阅读器不会判为损坏 */
+  let off = 8, found = false;
+  while (off + 12 <= withMeta.length) {
+    const len = ((withMeta[off] << 24) | (withMeta[off + 1] << 16) | (withMeta[off + 2] << 8) | withMeta[off + 3]) >>> 0;
+    const type = String.fromCharCode(withMeta[off + 4], withMeta[off + 5], withMeta[off + 6], withMeta[off + 7]);
+    if (type === 'tEXt') {
+      found = true;
+      const expect = localCrc32(Buffer.from(withMeta.slice(off + 4, off + 8 + len)));
+      const actual = ((withMeta[off + 8 + len] << 24) | (withMeta[off + 9 + len] << 16) |
+        (withMeta[off + 10 + len] << 8) | withMeta[off + 11 + len]) >>> 0;
+      if (expect !== actual) throw new Error('tEXt 块 CRC 不符，外部工具会判为损坏');
+    }
+    off += 12 + len;
+    if (type === 'IEND') break;
+  }
+  if (!found) throw new Error('PNG 中未找到 tEXt 块');
+});
+t('图片导入：本平台导出的 PNG / SVG 可还原到画布继续编辑', () => {
+  const IO = M.window.TopoImageIO;
+  const readonlyProj = JSON.parse(JSON.stringify(PROJ));
+  readonlyProj.settings.readonly = true;
+  const png = IO.injectPngMeta(new Uint8Array(minimalPNG()), readonlyProj);
+  const C1 = createApp(null);
+  const fi1 = C1.els['file-import'];
+  fi1.files = [{ name: 'topo.png', type: 'image/png', _buffer: png.buffer }];
+  fi1.onchange.call(fi1);
+  if (!C1.G('layer-nodes').includes('边界防火墙') || C1.count(C1.G('layer-links'), /class="link"/g) !== 2) {
+    throw new Error('PNG 导入未还原拓扑');
+  }
+  if (C1.sandbox.document.body.classList.contains('readonly-mode')) throw new Error('只读模式导出的图片导入后仍不可编辑');
+  const C0 = createApp(PROJ);
+  C0.qsa().export.find(b => b.getAttribute('data-export') === 'svg').onclick();
+  const xml = String(C0.blob().parts[0]);
+  const C2 = createApp(null);
+  const fi2 = C2.els['file-import'];
+  fi2.files = [{ name: 'topo.svg', type: 'image/svg+xml', _content: xml }];
+  fi2.onchange.call(fi2);
+  if (!C2.G('layer-nodes').includes('业务数据库') || !C2.G('layer-zones').includes('DMZ区')) {
+    throw new Error('SVG 导入未还原拓扑');
+  }
+});
+t('图片导入：普通图片明确拒绝且不改动当前画布', () => {
+  const C = createApp(PROJ);
+  const before = C.G('layer-nodes');
+  const fi = C.els['file-import'];
+  fi.files = [{ name: 'photo.png', type: 'image/png', _buffer: new Uint8Array(minimalPNG()).buffer }];
+  fi.onchange.call(fi);
+  if (!C.alertsRef().some(a => a.indexOf('不含本平台的可编辑工程元数据') >= 0)) throw new Error('未给出明确拒绝提示');
+  if (C.G('layer-nodes') !== before) throw new Error('拒绝导入时画布被改动');
+});
+t('画布查找：按名称 / IP 匹配并回车循环定位', () => {
+  const C = createApp(PROJ);
+  C.click('btn-search-scope');
+  if (!C.els['btn-search-scope'].textContent.includes('画布内')) throw new Error('搜索范围未切换');
+  C.els['asset-search'].value = '10.0.2.1';
+  C.fire('asset-search', 'input', C.els['asset-search']);
+  const hits = C.G('canvas-hits');
+  if (!hits.includes('业务数据库')) throw new Error('按 IP 未命中画布资产：' + hits);
+  C.els['asset-search'].listeners.keydown[0]({ key: 'Enter', target: C.els['asset-search'], preventDefault() {}, stopPropagation() {} });
+  if (!C.G('panel-prop').includes('业务数据库')) throw new Error('回车未定位并选中命中资产');
+  C.els['asset-search'].value = 'DMZ';
+  C.fire('asset-search', 'input', C.els['asset-search']);
+  if (!C.G('canvas-hits').includes('边界防火墙')) throw new Error('按安全区域未命中画布资产');
+  C.fire('canvas-hits', 'click', fake('data-hit', 'n2'));
+  if (!C.G('panel-prop').includes('Web服务器')) throw new Error('点击命中项未定位');
+});
+
 t('交互：连线可连到区域框（边界链路）', () => {
   const B = createApp(PROJ);
   B.click('btn-link');
