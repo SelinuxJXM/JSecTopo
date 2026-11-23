@@ -33,14 +33,16 @@
   }
   let S = emptyProject();
   let selection = new Set();
-  let tool = 'select', linkStyle = 'ortho', linkDraft = null, pendingIcon = null;
+  let tool = 'select', linkStyle = 'ortho', linkDraft = null, pendingIcon = null, placeLock = false;
   let history = [], future = [], clipboard = null;
   let drag = null, resize = null, pan = null, marquee = null, endpointDrag = null, spaceDown = false;
   /* v4 交互状态：矩形画区域、从端口拉线、拖动标签、悬停高亮、最后一次指针位置 */
-  let zoneDraw = null, portDrag = null, labelDrag = null, hoverId = null, lastWorld = { x: 0, y: 0 };
+  let zoneDraw = null, portDrag = null, labelDrag = null, waypointDrag = null, hoverId = null, lastWorld = { x: 0, y: 0 };
   const RESIZE_DIRS = ['nw', 'n', 'ne', 'e', 'se', 's', 'sw', 'w'];
   let editBefore = null, inspectorKey = '', saveTimer = null;
   let assetFilter = '', activeCat = 'all', flatMode = false;
+  /* 搜索范围：library = 过滤左侧图标库（默认）；canvas = 定位画布中已放置的资产 */
+  let searchScope = 'library', canvasHits = [], canvasHitIdx = 0;
   const collapsedCats = new Set();
   let diffResult = null;
   let customIcons = [];
@@ -52,6 +54,7 @@
       .replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
   }
   function clamp(v, a, b) { return Math.max(a, Math.min(b, v)); }
+  function isNum(v) { return typeof v === 'number' && isFinite(v); }
   function snapv(v) { return S.settings.snap ? Math.round(v / 20) * 20 : Math.round(v); }
   function iconOf(id) { return ICONS.map[id] || ICONS.map.generic; }
   function colorOf(n) { return n.color || ICONS.catColor(iconOf(n.icon).cat); }
@@ -70,6 +73,23 @@
     return null;
   }
   function zoneOf(n) { const z = S.zones.find(function (zz) { return zz.id === n.parent; }); return z ? z.label : (n.zone || ''); }
+  /* parent（容器引用）与 zone（落盘文本）必须双向一致。
+   * 旧逻辑多处写成 if (!n.zone) n.zone = z.label，导致资产已带 zone 文本（模板预置、手工填写、从旧区域移入）时
+   * 归属变了而文本没变，属性面板仍显示旧区域名。以下三个函数统一收口所有归属写入点。 */
+  function syncNodeZone(n, z) {
+    n.parent = z ? z.id : '';
+    n.zone = z ? z.label : '';
+  }
+  function zoneAt(x, y) {
+    const hits = S.zones.filter(function (zz) { return x >= zz.x && x <= zz.x + zz.w && y >= zz.y && y <= zz.y + zz.h; });
+    /* 与 hitTest 的嵌套区域规则一致：命中面积最小（最内层）的区域，避免归属到外层大框 */
+    return hits.sort(function (a, b) { return a.w * a.h - b.w * b.h; })[0] || null;
+  }
+  function syncNodeZoneByPos(n) { syncNodeZone(n, zoneAt(n.x + n.w / 2, n.y + n.h / 2)); }
+  /* 区域改名时，同步刷新所有归属该区域的资产文本，避免名称两处不一致 */
+  function syncZoneLabel(zId, label) {
+    S.nodes.forEach(function (n) { if (n.parent === zId) n.zone = label; });
+  }
   function toast(msg, kind) {
     const el = $('toast');
     el.textContent = msg; el.className = 'toast show' + (kind ? ' ' + kind : '');
@@ -99,7 +119,8 @@
     $('exp-name').textContent = c.name;
     const size = (c.blob && c.blob.size) || (c.text ? c.text.length : 0);
     $('exp-meta').textContent = c.kind + ' · ' + (size > 1024 ? (size / 1024).toFixed(1) + ' KB' : size + ' B');
-    $('exp-status').innerHTML = '<b>文件已生成</b>，已向浏览器发起下载请求。';
+    $('exp-status').innerHTML = '<b>文件已生成</b>，已向浏览器发起下载请求。' +
+      (/可重新导入编辑/.test(c.kind) ? '<br>该图片内嵌工程元数据，用「导入」选中它即可还原为可编辑拓扑。' : '');
     const link = $('exp-link');
     link.setAttribute('href', c.url);
     link.setAttribute('download', c.name);
@@ -127,8 +148,8 @@
   function snapshot() { return JSON.stringify(S); }
   function restore(str) {
     const d = typeof str === 'string' ? JSON.parse(str) : str;
-    S = Object.assign(SCHEMA.normalize(d), {
-      view: d.view || { x: 60, y: 40, zoom: 1 },
+    S = Object.assign(SCHEMA.normalize(d, { inferParent: false }), {
+      view: SCHEMA.sanitizeView(d.view),
       settings: Object.assign({ grid: true, snap: true, minimap: true, readonly: false, arrowDefault: false }, d.settings || {})
     });
     /* v2 及更早的工程曾把「默认带箭头」写进 settings，升级时一并纠正 */
@@ -142,8 +163,18 @@
     future = [];
     scheduleSave(); renderHistory();
   }
+  /* 属性面板的文本框/颜色框在 input 阶段已实时改写 S，change 时才把编辑前快照压栈。
+   * 若中途切换选中、按 Esc 或执行别的操作导致面板重绘，change 不会触发，
+   * editBefore 会残留并污染下一次无关的撤销。这里在操作边界统一结算。 */
+  function flushEditBefore() {
+    if (!editBefore) return;
+    const before = editBefore;
+    editBefore = null;
+    pushHistory(before, '编辑属性');
+  }
   function mutate(fn, label) {
     if (S.settings.readonly) { toast('只读评审模式下不可编辑', 'warn'); return false; }
+    flushEditBefore();
     const before = snapshot();
     fn();
     pushHistory(before, label);
@@ -164,6 +195,13 @@
     $('btn-readonly').classList.toggle('active', !!S.settings.readonly);
     $('btn-arrow-default').classList.toggle('active', !!S.settings.arrowDefault);
     document.body.classList.toggle('readonly-mode', !!S.settings.readonly);
+  }
+  /* 工程 / 页面切换、撤销重做时清空一切未提交的交互状态。
+   * 否则连线草稿里残留的旧 from id 会跨页成线，形成两端不在当前工程的孤儿链路。 */
+  function resetTransient() {
+    linkDraft = null; portDrag = null; zoneDraw = null; labelDrag = null;
+    waypointDrag = null; endpointDrag = null; drag = null; resize = null;
+    marquee = null; pan = null; hoverId = null; editBefore = null;
   }
 
   /* ---------------- 自定义图标 ---------------- */
@@ -239,10 +277,10 @@
     }
     return false;
   }
-  function linkPath(a, b, style) {
+  function linkPath(a, b, style, link) {
     const A = anchors(a, b), p1 = A[0], p2 = A[1], dir = A[2];
     const obstacles = S.nodes.filter(function (n) { return n !== a && n !== b; });
-    let d, pts = [p1, p2];
+    let d, pts = [p1, p2], bx = null, by = null;
     if (style === 'straight') {
       d = 'M' + p1.x + ' ' + p1.y + ' L' + p2.x + ' ' + p2.y;
     } else if (style === 'curve') {
@@ -255,20 +293,28 @@
       const cand = dir === 'h'
         ? [mid, a.x + a.w + 30, b.x - 30, mid + 70, mid - 70]
         : [mid, a.y + a.h + 30, b.y - 30, mid + 70, mid - 70];
-      let chosen = cand[0], found = false;
-      for (let i = 0; i < cand.length; i++) {
-        const v = cand[i];
-        const p = dir === 'h'
+      const ptsFor = function (v) {
+        return dir === 'h'
           ? [p1, { x: v, y: p1.y }, { x: v, y: p2.y }, p2]
           : [p1, { x: p1.x, y: v }, { x: p2.x, y: v }, p2];
-        if (!pathBlocked(p, obstacles)) { chosen = v; pts = p; found = true; break; }
+      };
+      let chosen = cand[0], found = false;
+      /* 手动拐点优先：用户拖过的走线不再被自动避障覆盖（draw.io 的控制点语义） */
+      if (link && isNum(link.bend)) {
+        chosen = link.bend; pts = ptsFor(chosen); found = true;
+      } else {
+        for (let i = 0; i < cand.length; i++) {
+          const v = cand[i];
+          const p = ptsFor(v);
+          if (!pathBlocked(p, obstacles)) { chosen = v; pts = p; found = true; break; }
+        }
+        if (!found) pts = ptsFor(chosen);
       }
-      if (!found) pts = dir === 'h'
-        ? [p1, { x: chosen, y: p1.y }, { x: chosen, y: p2.y }, p2]
-        : [p1, { x: p1.x, y: chosen }, { x: p2.x, y: chosen }, p2];
+      bx = dir === 'h' ? chosen : (p1.x + p2.x) / 2;
+      by = dir === 'h' ? (p1.y + p2.y) / 2 : chosen;
       d = 'M' + pts.map(function (p) { return p.x + ' ' + p.y; }).join(' L');
     }
-    return { d: d, mx: (p1.x + p2.x) / 2, my: (p1.y + p2.y) / 2, p1: p1, p2: p2 };
+    return { d: d, mx: (p1.x + p2.x) / 2, my: (p1.y + p2.y) / 2, p1: p1, p2: p2, bx: bx, by: by, dir: dir };
   }
   function colorId(c) { return String(c || '').replace(/[^a-zA-Z0-9]/g, '') || 'default'; }
   function buildMarkers() {
@@ -308,7 +354,7 @@
     let x = col === 'l' ? z.x + 8 : col === 'c' ? z.x + (z.w - w) / 2 : z.x + z.w - w - 8;
     let y = row === 't' ? z.y + 8 : row === 'm' ? z.y + (z.h - h) / 2 : z.y + z.h - h - 8;
     x += Number(z.labelDx) || 0; y += Number(z.labelDy) || 0;
-    const anchor = z.labelAlign || (col === 'l' ? 'start' : col === 'c' ? 'middle' : 'end');
+    const anchor = col === 'l' ? 'start' : col === 'c' ? 'middle' : 'end';
     const tx = anchor === 'start' ? x + 10 : anchor === 'middle' ? x + w / 2 : x + w - 10;
     return {
       x: x, y: y, w: w, h: h, tx: tx, ty: y + fs + 4, anchor: anchor,
@@ -372,8 +418,11 @@
     }
     const handle = sel && !S.settings.readonly ?
       portHandles(0, 0, n.w, n.h) + resizeHandles(0, 0, n.w, n.h) : '';
+    /* 原生 tooltip 补齐画布内悬停信息：名称较长被框体截断时仍可一眼读到 IP 与所属区域 */
+    const tip = [n.label, n.ip, zoneOf(n)].filter(Boolean).join(' · ');
     return '<g class="node" data-id="' + n.id + '" data-kind="node" transform="translate(' + n.x + ',' + n.y + ')" ' +
-      'tabindex="0" role="button" aria-label="' + esc(n.label + '，' + ICONS.catName(iconOf(n.icon).cat) + ' / ' + ICONS.subOf(n.icon)) + '" style="cursor:move">' + body + handle + '</g>';
+      'tabindex="0" role="button" aria-label="' + esc(n.label + '，' + ICONS.catName(iconOf(n.icon).cat) + ' / ' + ICONS.subOf(n.icon)) + '" style="cursor:move">' +
+      '<title>' + esc(tip) + '</title>' + body + handle + '</g>';
   }
   function renderZone(z) {
     const sel = selection.has(z.id), c = z.color || '#94a3b8';
@@ -426,7 +475,7 @@
   function renderLink(l) {
     const a = endpointById(l.from), b = endpointById(l.to);
     if (!a || !b) return '';
-    const p = linkPath(a, b, l.style || 'ortho'), sel = selection.has(l.id);
+    const p = linkPath(a, b, l.style || 'ortho', l), sel = selection.has(l.id);
     const c = l.color || '#64748b';
     const marker = l.arrow === true ? ' marker-end="url(#arw-' + colorId(c) + ')"' : '';
     const dash = l.dash ? ' stroke-dasharray="8 5"' : '';
@@ -437,22 +486,33 @@
     if (sel && !S.settings.readonly) {
       extra = '<circle data-handle="ep-from" cx="' + p.p1.x + '" cy="' + p.p1.y + '" r="6" fill="#2563eb" stroke="#fff" stroke-width="2" style="cursor:crosshair"/>' +
         '<circle data-handle="ep-to" cx="' + p.p2.x + '" cy="' + p.p2.y + '" r="6" fill="#16a34a" stroke="#fff" stroke-width="2" style="cursor:crosshair"/>' +
-        (l.label ? '<rect data-handle="link-label" x="' + (lx - 7) + '" y="' + (ly - 13) + '" width="14" height="7" rx="2" fill="#2563eb" stroke="#fff" stroke-width="1" style="cursor:move"/>' : '');
+        (l.label ? '<rect data-handle="link-label" x="' + (lx - 7) + '" y="' + (ly - 13) + '" width="14" height="7" rx="2" fill="#2563eb" stroke="#fff" stroke-width="1" style="cursor:move"/>' : '') +
+        /* 正交走线控制点：拖动即可改变拐点，与 draw.io 的 waypoint 一致 */
+        (p.bx !== null ? '<circle data-handle="waypoint" cx="' + p.bx + '" cy="' + p.by +
+          '" r="6.5" fill="#7c3aed" stroke="#fff" stroke-width="2" style="cursor:move"/>' : '');
     }
     return '<g class="link" data-id="' + l.id + '" data-kind="link" style="cursor:pointer">' +
       '<path d="' + p.d + '" fill="none" stroke="transparent" stroke-width="16" pointer-events="stroke"/>' +
-      '<path d="' + p.d + '" fill="none" stroke="' + c + '" stroke-width="' + w + '"' + dash + marker + ' stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>' +
+      '<path d="' + p.d + '" fill="none" stroke="' + c + '" stroke-width="' + w + '" data-base-width="' + (l.width || 2) + '"' + dash + marker + ' stroke-linecap="round" stroke-linejoin="round" pointer-events="none"/>' +
       (l.label ? '<text x="' + lx + '" y="' + ly + '" text-anchor="middle" font-size="11" fill="#475569" font-family="' + FONT + '" ' +
         'paint-order="stroke" stroke="#ffffff" stroke-width="4" pointer-events="none">' + esc(l.label) + '</text>' : '') +
       extra + '</g>';
   }
-  function dragPreview(fromId, point, color, marker) {
-    const a = endpointById(fromId);
+  /* 拖拽预览按当前线型生成，并吸附到悬停目标的实际端点，而不是始终画一条中心直线。
+   * 无明确目标时用指针处的小方块作临时端点，保证预览与松手后的真实链路一致。 */
+  function dragPreview(fromId, point, color, marker, style, targetId) {
+    const a = endpointById(fromId) ||
+      (linkDraft && linkDraft.pendingAnchor && linkDraft.pendingAnchor.id === fromId ? linkDraft.pendingAnchor : null);
     if (!a) return '';
+    const b = targetId ? endpointById(targetId) : null;
+    const temp = b || { x: point.x - 2, y: point.y - 2, w: 4, h: 4 };
+    const p = linkPath(a, temp, style || 'straight', null);
     const ax = a.x + a.w / 2, ay = a.y + a.h / 2;
-    return '<path d="M' + ax + ' ' + ay + ' L' + point.x + ' ' + point.y + '" fill="none" stroke="' + color +
+    return '<path d="' + p.d + '" fill="none" stroke="' + color +
       '" stroke-width="2" stroke-dasharray="7 5" ' + (marker ? 'marker-end="url(#arw-2563eb)" ' : '') + 'pointer-events="none"/>' +
-      '<circle cx="' + ax + '" cy="' + ay + '" r="7" fill="none" stroke="' + color + '" stroke-width="2" pointer-events="none"/>';
+      '<circle cx="' + ax + '" cy="' + ay + '" r="7" fill="none" stroke="' + color + '" stroke-width="2" pointer-events="none"/>' +
+      (b ? '<circle cx="' + (b.x + b.w / 2) + '" cy="' + (b.y + b.h / 2) + '" r="9" fill="none" stroke="' + color +
+        '" stroke-width="2" pointer-events="none"/>' : '');
   }
   function targetTip(point) {
     const o = endpointById(hoverId);
@@ -473,14 +533,29 @@
       '" rx="12" fill="#3b82f6" fill-opacity="0.09" stroke="#2563eb" stroke-width="2" stroke-dasharray="7 5" pointer-events="none"/>' +
       '<text x="' + (zoneDraw.x + 10) + '" y="' + (zoneDraw.y + 22) + '" font-size="12" font-weight="700" fill="#1d4ed8" font-family="' + FONT +
       '" pointer-events="none">安全区域 ' + Math.round(zoneDraw.w) + ' × ' + Math.round(zoneDraw.h) + '</text>';
-    if (linkDraft) ov += dragPreview(linkDraft.from, linkDraft.point, '#2563eb', true);
-    if (portDrag) ov += dragPreview(portDrag.from, portDrag.point, '#2563eb', true);
-    if (endpointDrag) ov += dragPreview(
-      (S.links.find(function (x) { return x.id === endpointDrag.lid; }) || {})[endpointDrag.which === 'from' ? 'to' : 'from'],
-      endpointDrag.point, '#16a34a', false);
+    if (linkDraft) ov += dragPreview(linkDraft.from, linkDraft.point, '#2563eb', true, linkStyle, hoverId);
+    if (portDrag) ov += dragPreview(portDrag.from, portDrag.point, '#2563eb', true, linkStyle, hoverId);
+    if (endpointDrag) {
+      const el = S.links.find(function (x) { return x.id === endpointDrag.lid; }) || {};
+      ov += dragPreview(el[endpointDrag.which === 'from' ? 'to' : 'from'], endpointDrag.point, '#16a34a', false,
+        el.style || 'ortho', hoverId);
+    }
     if (hoverId && (linkDraft || portDrag || endpointDrag)) {
       const pt = (portDrag && portDrag.point) || (linkDraft && linkDraft.point) || (endpointDrag && endpointDrag.point);
       ov += haloHTML(hoverId) + (pt ? targetTip(pt) : '');
+    }
+    /* 悬停即显示可拉线端口（draw.io 式），无需先选中；端口带 data-id 可直接拖出新连线 */
+    if (hoverId && !selection.has(hoverId) && tool === 'select' && !drag && !marquee && !resize && !pan &&
+        !linkDraft && !portDrag && !endpointDrag && !labelDrag && !waypointDrag) {
+      const ho = endpointById(hoverId);
+      if (ho && ho.w) {
+        const pts = [[ho.x + ho.w / 2, ho.y, 'n'], [ho.x + ho.w, ho.y + ho.h / 2, 'e'],
+          [ho.x + ho.w / 2, ho.y + ho.h, 's'], [ho.x, ho.y + ho.h / 2, 'w']];
+        ov += pts.map(function (q) {
+          return '<circle class="port hover-port" data-id="' + hoverId + '" data-handle="port" data-port="' + q[2] +
+            '" cx="' + q[0] + '" cy="' + q[1] + '" r="5" fill="#ffffff" stroke="#93b4f7" stroke-width="1.6" style="cursor:crosshair"/>';
+        }).join('');
+      }
     }
     return ov;
   }
@@ -511,6 +586,8 @@
     renderMinimap();
   }
   function render() {
+    /* 面板即将重建，先把未结算的属性编辑压栈，避免 change 丢失后残留到下一次操作 */
+    flushEditBefore();
     /* 强制刷新属性面板：端点改接、批量编辑等场景下 selection 不变但对象内容已变 */
     repaint(); updateInspector(true); updateStatus(); renderPages(); scheduleSave();
   }
@@ -671,6 +748,44 @@
       (ICONS.icons.length + ' 个 · ' + ICONS.categories.length + ' 类 ' + ICONS.subgroups.length + ' 组');
     syncAssetTools();
   }
+  /* 画布内查找：与左侧图标库共用输入框，用范围按钮切换。
+   * 命中项按名称 / IP / 型号 / 系统版本 / 安全区域 / 备注匹配，回车循环定位并短暂高亮。 */
+  function canvasSearch(q) {
+    const k = q.trim().toLowerCase();
+    if (!k) return [];
+    return S.nodes.filter(function (n) {
+      return [n.label, n.ip, n.model, n.osType, zoneOf(n), n.note]
+        .some(function (v) { return String(v || '').toLowerCase().indexOf(k) >= 0; });
+    });
+  }
+  function clearCanvasHits() {
+    canvasHits = []; canvasHitIdx = 0;
+    const box = $('canvas-hits'); if (box) { box.innerHTML = ''; box.style.display = 'none'; }
+  }
+  function renderCanvasHits() {
+    const box = $('canvas-hits');
+    if (!box || searchScope !== 'canvas') { clearCanvasHits(); return; }
+    canvasHits = canvasSearch($('asset-search').value);
+    canvasHitIdx = 0;
+    if (!canvasHits.length) { box.innerHTML = ''; box.style.display = 'none'; return; }
+    box.innerHTML = canvasHits.slice(0, 8).map(function (n, i) {
+      return '<button type="button" data-hit="' + n.id + '">' + esc(n.label || '未命名资产') +
+        '<small>' + esc(zoneOf(n) || ICONS.subOf(n.icon)) + '</small></button>';
+    }).join('') + (canvasHits.length > 8
+      ? '<div class="hit-more">另有 ' + (canvasHits.length - 8) + ' 项，按回车循环定位</div>' : '');
+    box.style.display = 'block';
+  }
+  function locateCanvasHit(n) {
+    if (!n) return;
+    selection = new Set([n.id]);
+    switchRight('prop');
+    centerOn(n);
+    render();
+    /* 短暂停留的蓝色光环，便于在密集拓扑里确认命中位置 */
+    hoverId = n.id; repaint();
+    clearTimeout(locateCanvasHit._t);
+    locateCanvasHit._t = setTimeout(function () { hoverId = null; repaint(); }, 1400);
+  }
   function renderTemplates() {
     $('tpl-list').innerHTML = TPL.list().map(function (t) {
       return '<div class="tpl-card" data-tpl="' + t.id + '"><div class="tpl-head"><span class="tpl-badge">' +
@@ -700,10 +815,8 @@
         w: isText ? 190 : 108, h: isText ? 76 : 86,
         label: isText ? '双击编辑文本内容' : it.name
       });
-      /* 自动归属到所在区域框 */
-      const cx = n.x + n.w / 2, cy = n.y + n.h / 2;
-      const z = S.zones.find(function (zz) { return cx >= zz.x && cx <= zz.x + zz.w && cy >= zz.y && cy <= zz.y + zz.h; });
-      if (z) { n.parent = z.id; n.zone = z.label; }
+      /* 自动归属到所在区域框（parent 与 zone 文本同步写入） */
+      syncNodeZoneByPos(n);
       S.nodes.push(n); selection = new Set([n.id]);
     }, '添加资产');
   }
@@ -711,7 +824,8 @@
     if (!selection.size) return;
     mutate(function () {
       const ids = selection;
-      S.nodes.forEach(function (n) { if (ids.has(n.parent)) n.parent = ''; });
+      /* 区域被删除后，原归属资产的 parent 与 zone 一并清空，不留孤儿区域名 */
+      S.nodes.forEach(function (n) { if (ids.has(n.parent)) syncNodeZone(n, null); });
       S.nodes = S.nodes.filter(function (n) { return !ids.has(n.id); });
       S.zones = S.zones.filter(function (z) { return !ids.has(z.id); });
       S.anchors = anchorList().filter(function (a) { return !ids.has(a.id); });
@@ -726,11 +840,22 @@
       const map = {}, nodes = [], zones = [], acs = [];
       S.nodes.forEach(function (n) {
         if (!selection.has(n.id)) return;
-        const c = JSON.parse(JSON.stringify(n)); c.id = SCHEMA.newId('n'); c.x += 30; c.y += 30; map[n.id] = c.id; nodes.push(c);
+        const c = JSON.parse(JSON.stringify(n)); c.id = SCHEMA.newId('n'); c.x += 30; c.y += 30;
+        c.__parent = n.parent || ''; map[n.id] = c.id; nodes.push(c);
       });
       S.zones.forEach(function (z) {
         if (!selection.has(z.id)) return;
         const c = JSON.parse(JSON.stringify(z)); c.id = SCHEMA.newId('z'); c.x += 30; c.y += 30; map[z.id] = c.id; zones.push(c);
+      });
+      /* 区域与内部资产一起复制时，归属必须指向复制出的新区域；
+       * 否则拖动新区域时资产不动，反而会跟随原区域，属性面板也显示旧区域名。 */
+      nodes.forEach(function (c) {
+        const old = c.__parent; delete c.__parent;
+        if (old && map[old]) {
+          const z = zones.find(function (zz) { return zz.id === map[old]; });
+          c.parent = map[old];
+          c.zone = z ? z.label : c.zone;
+        }
       });
       anchorList().forEach(function (a) {
         if (!selection.has(a.id)) return;
@@ -773,7 +898,9 @@
       const map = {}, sel = [], acs = [];
       cb.nodes.forEach(function (n) {
         const c = JSON.parse(JSON.stringify(n)); c.id = SCHEMA.newId('n');
-        c.x = snapv(n.x + ox); c.y = snapv(n.y + oy); c.parent = '';
+        c.x = snapv(n.x + ox); c.y = snapv(n.y + oy);
+        /* 粘贴得到的是新对象，不应继承原区域的归属文本 */
+        syncNodeZone(c, null);
         map[n.id] = c.id; S.nodes.push(c); sel.push(c.id);
       });
       cb.zones.forEach(function (z) {
@@ -835,8 +962,8 @@
 
   /* ---------------- 工具 / 连线 ---------------- */
   function setTool(t) {
-    tool = t; linkDraft = null; portDrag = null; zoneDraw = null; hoverId = null;
-    if (t !== 'place') pendingIcon = null;
+    tool = t; resetTransient();
+    if (t !== 'place') { pendingIcon = null; placeLock = false; }
     $('btn-link').classList.toggle('active', t === 'link');
     $('btn-hand').classList.toggle('active', t === 'hand');
     $('btn-zone').classList.toggle('active', t === 'zone');
@@ -949,7 +1076,13 @@
       mutate(function () { anchorList().push(newAnchorAt(w)); }, '添加连接点');
       toast('已放置连接点，可双击改名'); repaint(); return;
     }
-    if (tool === 'place' && pendingIcon) { addAt(pendingIcon, w.x - 54, w.y - 43); setTool('select'); return; }
+    if (tool === 'place' && pendingIcon) {
+      addAt(pendingIcon, w.x - 54, w.y - 43);
+      /* 点选资产图标默认放一个即退出；Ctrl/Shift 点选进入连续放置，省去逐个回面板取图标 */
+      if (placeLock) $('hint-text').textContent = '连续放置「' + iconOf(pendingIcon).name + '」中 · 继续点击画布，Esc 退出';
+      else setTool('select');
+      return;
+    }
     if (tool === 'link') {
       const preferZone = !!(e.ctrlKey || e.metaKey);
       let targetId = null;
@@ -960,12 +1093,12 @@
       }
       const res = targetId ? { id: targetId, anchor: null } : ensureAnchorAt(w, { preferZone: preferZone });
       if (!linkDraft) {
-        if (res.anchor) mutate(function () { anchorList().push(res.anchor); }, '添加连接点');
-        linkDraft = { from: res.id, point: w };
+        /* 起点落在空白处时先暂存连接点，只有真正成线才落盘，避免 Esc 取消后留下孤立点 */
+        linkDraft = { from: res.id, point: w, pendingAnchor: res.anchor || null };
       } else {
-        const from = linkDraft.from;
+        const from = linkDraft.from, startAnchor = linkDraft.pendingAnchor;
         linkDraft = null;
-        makeLink(from, res.id, null, null, res.anchor);
+        makeLink(from, res.id, null, null, startAnchor || res.anchor);
       }
       repaint(); return;
     }
@@ -977,6 +1110,16 @@
     if (handle === 'ep-from' || handle === 'ep-to') {
       endpointDrag = { lid: id, which: handle === 'ep-from' ? 'from' : 'to', point: w, before: snapshot() };
       repaint(); return;
+    }
+    /* 正交连线的走线控制点：拖动改变折线拐点 */
+    if (handle === 'waypoint' && id) {
+      const l = S.links.find(function (x) { return x.id === id; });
+      if (l) {
+        const pa = endpointById(l.from), pb = endpointById(l.to);
+        const dir = pa && pb ? anchors(pa, pb)[2] : 'h';
+        waypointDrag = { lid: id, dir: dir, before: snapshot() };
+        repaint(); return;
+      }
     }
     /* 拖动区域标题 / 连线标注，位置自由摆放并写入工程 */
     if ((handle === 'zone-label' || handle === 'link-label') && id) {
@@ -1069,6 +1212,11 @@
       }
       repaint(); return;
     }
+    if (waypointDrag) {
+      const l = S.links.find(function (x) { return x.id === waypointDrag.lid; });
+      if (l) l.bend = Math.round(waypointDrag.dir === 'h' ? w.x : w.y);
+      repaint(); return;
+    }
     if (drag) {
       const dx = w.x - drag.sx, dy = w.y - drag.sy;
       if (Math.abs(dx) > 1 || Math.abs(dy) > 1) drag.moved = true;
@@ -1101,8 +1249,8 @@
       marquee.w = Math.abs(w.x - marquee.sx); marquee.h = Math.abs(w.y - marquee.sy);
       repaint(); return;
     }
-    /* 连线工具下的悬停提示：让「可连到什么」一目了然 */
-    const h = tool === 'link' ? hitTest(w, {}) : null;
+    /* 悬停即显示可拉线端口（draw.io 式）；连线工具下同时高亮可连接目标 */
+    const h = hitTest(w, {});
     if (h !== hoverId) { hoverId = h; overlay.innerHTML = overlayHTML(); }
   }
   function onUp() {
@@ -1115,10 +1263,10 @@
             id: SCHEMA.newId('z'), x: x, y: y, w: zw, h: zh, label: '安全区域', color: '#3b82f6'
           });
           S.zones.push(z);
-          /* 落入新区域的资产自动归属 */
+          /* 落入新区域的资产自动归属，并无条件刷新 zone 文本 */
           S.nodes.forEach(function (n) {
             const cx = n.x + n.w / 2, cy = n.y + n.h / 2;
-            if (cx >= x && cx <= x + zw && cy >= y && cy <= y + zh) { n.parent = z.id; if (!n.zone) n.zone = z.label; }
+            if (cx >= x && cx <= x + zw && cy >= y && cy <= y + zh) syncNodeZone(n, z);
           });
           selection = new Set([z.id]);
         }, '绘制安全区域');
@@ -1136,15 +1284,14 @@
       pushHistory(labelDrag.before, '移动标注');
       labelDrag = null; render(); return;
     }
+    if (waypointDrag) {
+      pushHistory(waypointDrag.before, '调整走线拐点');
+      waypointDrag = null; render(); return;
+    }
     if (drag) {
       if (drag.moved) {
-        /* 重新推断节点归属区域 */
-        S.nodes.forEach(function (n) {
-          const cx = n.x + n.w / 2, cy = n.y + n.h / 2;
-          const z = S.zones.find(function (zz) { return cx >= zz.x && cx <= zz.x + zz.w && cy >= zz.y && cy <= zz.y + zz.h; });
-          n.parent = z ? z.id : '';
-          if (z && !n.zone) n.zone = z.label;
-        });
+        /* 重新推断节点归属区域：parent 与 zone 文本同步，移出区域时文本也清空 */
+        S.nodes.forEach(syncNodeZoneByPos);
         pushHistory(drag.before, '移动对象');
       }
       drag = null; render(); return;
@@ -1213,7 +1360,12 @@
     const menu = $('context-menu');
     /* CSS 按上下文裁剪菜单项，空白处右键只显示「在此新建」类命令 */
     menu.setAttribute('data-ctx', !hit ? 'blank' : (hit.getAttribute('data-kind') === 'link' ? 'link' : 'object'));
-    menu.style.left = e.clientX + 'px'; menu.style.top = e.clientY + 'px'; menu.classList.add('show');
+    /* 菜单有 10 项，靠右/靠下右键时会整个溢出视口；先显示再按实际尺寸钳制 */
+    menu.classList.add('show');
+    const vw = window.innerWidth || 1200, vh = window.innerHeight || 800;
+    const mw = menu.offsetWidth || 186, mh = menu.offsetHeight || 360;
+    menu.style.left = Math.max(4, Math.min(e.clientX, vw - mw - 4)) + 'px';
+    menu.style.top = Math.max(4, Math.min(e.clientY, vh - mh - 4)) + 'px';
   }
   function onDblClick(e) {
     if (S.settings.readonly) return;
@@ -1239,9 +1391,13 @@
       wx = o.x + 6; wy = o.y + o.h - 34; ww = o.w - 12;
     }
     const p = worldToScreen(wx, wy);
-    ed.style.left = p.x + 'px'; ed.style.top = p.y + 'px';
     ed.style.width = Math.max(120, ww * S.view.zoom) + 'px';
     ed.value = o.label || '';
+    /* 边缘对象的编辑框同样钳制在视口内，否则输入框会被画布边缘截断 */
+    const vw = window.innerWidth || 1200, vh = window.innerHeight || 800;
+    const ew = ed.offsetWidth || parseFloat(ed.style.width) || 120, eh = ed.offsetHeight || 34;
+    ed.style.left = Math.max(4, Math.min(p.x, vw - ew - 4)) + 'px';
+    ed.style.top = Math.max(4, Math.min(p.y, vh - eh - 4)) + 'px';
     ed.dataset.target = o.id; ed.dataset.kind = t;
     ed.style.display = 'block'; ed.focus(); ed.select();
   }
@@ -1252,7 +1408,10 @@
     ed.style.display = 'none';
     const f = findObj(id);
     if (!f || f.o.label === val) return;
-    mutate(function () { f.o.label = val; }, '修改名称');
+    mutate(function () {
+      f.o.label = val;
+      if (f.t === 'zone') syncZoneLabel(f.o.id, val);
+    }, '修改名称');
   }
 
   /* ---------------- 属性面板 ---------------- */
@@ -1410,25 +1569,47 @@
         '<label class="fld fld-check"><span>显示箭头</span><input data-field="arrow" type="checkbox"' + (o.arrow !== false ? ' checked' : '') + '></label>' +
         '<label class="fld"><span>线条颜色</span><div class="color-row"><input data-field="color" type="color" value="' +
         esc(o.color || '#64748b') + '"><button class="btn tiny" data-act="reset-color">恢复默认</button></div></label>' +
-        '<div class="tip-box">端点可连资产、安全区域或连接点：拖动两端圆点改接，松手在空白处会自动新建连接点；标注可直接拖动。</div>' +
+        '<div class="tip-box">端点可连资产、安全区域或连接点：拖动两端圆点改接，松手在空白处会自动新建连接点；标注可直接拖动。正交折线可拖动紫色控制点调整走线，「重置走线」恢复自动避障。</div>' +
         '<div class="btn-row"><button class="btn ghost" data-act="apply-arrow-all">箭头应用到全部</button>' +
         '<button class="btn ghost" data-act="apply-style-all">线型应用到全部</button>' +
         '<button class="btn ghost" data-act="reset-label">重置标注位置</button>' +
+        '<button class="btn ghost" data-act="reset-bend">重置走线</button>' +
         '<button class="btn danger" data-act="delete">删除连线</button></div></div>';
     }
   }
   function applyField(k, v, src) {
+    /* 只读评审模式：mutate 之外的属性面板写入路径也必须拦截，否则可绕过只读直接改数据 */
+    if (S.settings.readonly) return;
     const objs = [];
     selection.forEach(function (id) { const f = findObj(id); if (f) objs.push(f.o); });
     objs.forEach(function (o) {
-      if (k === 'w' || k === 'h') o[k] = clamp(parseFloat(v) || 60, 60, 2000);
+      if (k === 'w' || k === 'h') {
+        /* 区域框有独立最小尺寸（160×100），不能套用资产的 60px 下限 */
+        const isZone = !!o.icon && ICONS.zoneIds.indexOf(o.icon) >= 0;
+        const min = isZone ? (k === 'w' ? 160 : 100) : 60;
+        o[k] = clamp(parseFloat(v) || min, min, 2000);
+      }
       else if (k === 'width') o.width = clamp(parseFloat(v) || 2, 1, 8);
       else if (k === 'dash' || k === 'arrow' || k === 'locked') o[k] = !!v;
       else if (selection.size > 1 && String(v) === '') return;
+      else if (k === 'zone') {
+        /* 仅资产具备 parent / zone 语义，避免多选批量编辑污染区域与连线对象 */
+        if (o.parent === undefined) return;
+        /* 手工填写所属安全区域：能匹配到画布区域时同步建立 parent，否则按自由文本保留 */
+        o.zone = v;
+        const z = S.zones.find(function (zz) { return zz.label === v; });
+        o.parent = z ? z.id : '';
+      }
+      else if (k === 'label' && S.zones.indexOf(o) >= 0) {
+        /* 区域改名必须即时同步子资产文本：change 事件可能在面板重绘时丢失，不能只依赖 onPropChange */
+        o.label = v;
+        syncZoneLabel(o.id, v);
+      }
       else o[k] = v;
     });
   }
   function onPropInput(e) {
+    if (S.settings.readonly) return;
     const k = e.target.getAttribute('data-field');
     if (!k) return;
     const tag = e.target.tagName, type = (e.target.type || '').toLowerCase();
@@ -1443,12 +1624,19 @@
     repaint();
   }
   function onPropChange(e) {
+    if (S.settings.readonly) return;
     const k = e.target.getAttribute('data-field');
     if (!k) return;
     const v = e.target.type === 'checkbox' ? e.target.checked : e.target.value;
-    if (editBefore) { pushHistory(editBefore, '编辑属性'); editBefore = null; render(); return; }
+    const f0 = k === 'label' ? findObj([...selection][0]) : null;
+    if (editBefore) {
+      pushHistory(editBefore, '编辑属性'); editBefore = null;
+      if (f0 && f0.t === 'zone') syncZoneLabel(f0.o.id, v);
+      render(); return;
+    }
     const before = snapshot();
     applyField(k, v);
+    if (f0 && f0.t === 'zone') syncZoneLabel(f0.o.id, v);
     pushHistory(before, '编辑属性');
     if (k === 'icon' || k === 'style') inspectorKey = '';
     render();
@@ -1494,7 +1682,15 @@
     $('batch-box').querySelectorAll('[data-batch]').forEach(function (el) { if (el.value) vals[el.getAttribute('data-batch')] = el.value; });
     if (!Object.keys(vals).length) { toast('没有填写要批量设置的内容', 'warn'); return; }
     mutate(function () {
-      S.nodes.forEach(function (n) { if (batchRows.has(n.id)) Object.keys(vals).forEach(function (k) { n[k] = vals[k]; }); });
+      S.nodes.forEach(function (n) {
+        if (!batchRows.has(n.id)) return;
+        Object.keys(vals).forEach(function (k) { n[k] = vals[k]; });
+        if (vals.zone !== undefined) {
+          const z = S.zones.find(function (zz) { return zz.label === vals.zone; });
+          if (z) syncNodeZone(n, z);
+          else { n.parent = ''; n.zone = vals.zone; }
+        }
+      });
     }, '批量设置资产字段');
     toast('已更新 ' + batchRows.size + ' 项资产');
     renderAssetTable();
@@ -1512,17 +1708,35 @@
     const vp = clone.querySelector('#viewport'); if (vp) vp.setAttribute('transform', 'translate(0,0) scale(1)');
     const gb = clone.querySelector('#grid-bg'); if (gb) gb.remove();
     const ov = clone.querySelector('#layer-overlay'); if (ov) ov.innerHTML = '';
-    clone.querySelectorAll('[data-handle]').forEach(function (e) { e.remove(); });
+    clone.querySelectorAll('[data-handle]').forEach(function (e) {
+      /* 区域名文本与背板带 data-handle 仅为画布内可拖动；导出必须保留文字本体，
+       * 否则安全区域名称会从 PNG / SVG / 报告版式中整体消失。此处只摘交互标记。 */
+      if (e.getAttribute('data-handle') === 'zone-label') {
+        e.removeAttribute('data-handle');
+        e.removeAttribute('style');
+        return;
+      }
+      e.remove();
+    });
     clone.querySelectorAll('[tabindex]').forEach(function (e) { e.removeAttribute('tabindex'); });
     clone.querySelectorAll('[data-selected="1"]').forEach(function (e) {
       if (e.classList.contains('node-bg')) { e.setAttribute('stroke', '#d9e0ea'); e.setAttribute('stroke-width', '1.4'); }
       else { e.setAttribute('stroke', e.getAttribute('data-base-stroke') || '#94a3b8'); e.setAttribute('stroke-width', '1.6'); }
     });
+    /* 选中/悬停时连线主线会被加粗 1.5px，导出必须回到工程里的真实线宽，
+     * 否则同一张图在不同选择状态下导出的线宽不一致。 */
+    clone.querySelectorAll('[data-base-width]').forEach(function (e) {
+      e.setAttribute('stroke-width', e.getAttribute('data-base-width'));
+    });
     const bg = document.createElementNS(NS, 'rect');
     bg.setAttribute('x', x); bg.setAttribute('y', y); bg.setAttribute('width', w); bg.setAttribute('height', h);
     bg.setAttribute('fill', '#ffffff');
     clone.insertBefore(bg, clone.firstChild);
-    return { xml: new XMLSerializer().serializeToString(clone), w: w, h: h, box: { x: x, y: y, w: w, h: h } };
+    /* 写入自描述工程数据，使导出的 SVG / 由其转成的 PNG 都能原样导回继续编辑 */
+    const project = JSON.parse(snapshot()); project.version = SCHEMA.VERSION;
+    let xml = new XMLSerializer().serializeToString(clone);
+    if (window.TopoImageIO) xml = window.TopoImageIO.injectSvgMeta(xml, project);
+    return { xml: xml, w: w, h: h, box: { x: x, y: y, w: w, h: h } };
   }
   function framedXml() {
     const o = buildExportSVG();
@@ -1536,7 +1750,10 @@
   }
   function exportPNG(framed) {
     const o = framed ? framedXml() : buildExportSVG();
+    const project = JSON.parse(snapshot()); project.version = SCHEMA.VERSION;
     const scale = framed ? 2 : 2;
+    const name = (S.meta.name || '拓扑') + (framed ? '_报告版式' : '') + '.png';
+    const kind = framed ? '报告版式 PNG（2×）' : 'PNG 图片（2×）';
     const url = URL.createObjectURL(new Blob([o.xml], { type: 'image/svg+xml;charset=utf-8' }));
     const img = new Image();
     img.onload = function () {
@@ -1547,9 +1764,14 @@
       ctx.drawImage(img, 0, 0, cv.width, cv.height);
       URL.revokeObjectURL(url);
       cv.toBlob(function (b) {
-        if (b) download((S.meta.name || '拓扑') + (framed ? '_报告版式' : '') + '.png', b,
-          { kind: framed ? '报告版式 PNG（2×）' : 'PNG 图片（2×）' });
-        else toast('PNG 导出失败，可改用 SVG', 'warn');
+        if (!b) { toast('PNG 导出失败，可改用 SVG', 'warn'); return; }
+        /* 位图无法靠图形还原业务字段：写入标准 tEXt 块承载完整工程，导入时可原样恢复 */
+        if (!window.TopoImageIO || !b.arrayBuffer) { download(name, b, { kind: kind }); return; }
+        b.arrayBuffer().then(function (ab) {
+          const bytes = window.TopoImageIO.injectPngMeta(new Uint8Array(ab), project);
+          download(name, bytes ? new Blob([bytes], { type: 'image/png' }) : b,
+            { kind: kind + (bytes ? ' · 可重新导入编辑' : '') });
+        }).catch(function () { download(name, b, { kind: kind }); });
       }, 'image/png');
     };
     img.onerror = function () { URL.revokeObjectURL(url); toast('PNG 导出失败，可改用 SVG', 'warn'); };
@@ -1561,24 +1783,56 @@
     download((S.meta.name || '拓扑') + '.json', new Blob([txt], { type: 'application/json' }),
       { text: txt, kind: '工程 JSON v' + SCHEMA.VERSION });
   }
+  function importFailed(msg) {
+    alert('工程导入失败：\n\n' + msg);
+    toast('导入失败：' + String(msg).split('\n')[0], 'warn');
+  }
+  function applyImportedProject(txt, label) {
+    const v = SCHEMA.validate(txt);
+    if (!v.ok) { importFailed(v.errors.join('\n') + '\n\n请确认文件为本平台导出的工程或图片。'); return; }
+    const before = snapshot();
+    const d = JSON.parse(txt);
+    S = Object.assign(v.data, {
+      view: SCHEMA.sanitizeView(v.view || d.view),
+      settings: Object.assign(S.settings, v.settings || d.settings || {})
+    });
+    selection = new Set(); history = []; future = []; resetTransient(); clearCanvasHits();
+    pushHistory(before, label);
+    syncToggles(); render(); renderAssets(); fit();
+    toast('导入成功：' + S.nodes.length + ' 个资产' + (v.warnings.length ? '（' + v.warnings.join('；') + '）' : ''));
+  }
+  /* 支持三类输入：工程 JSON、本平台导出的 SVG、本平台导出的 PNG。
+   * 图片的可编辑性来自导出时写入的自描述元数据；普通图片不含元数据，明确拒绝而非猜测图形。 */
   function importProject(file) {
+    const name = String(file.name || '').toLowerCase();
+    const type = String(file.type || '').toLowerCase();
+    const isPng = /\.png$/.test(name) || type.indexOf('image/png') >= 0;
+    const isSvg = /\.svg$/.test(name) || type.indexOf('image/svg+xml') >= 0;
+    if (isPng) {
+      const frPng = new FileReader();
+      frPng.onload = function () {
+        if (!window.TopoImageIO) { importFailed('图像元数据模块未加载，无法导入 PNG'); return; }
+        const p = window.TopoImageIO.extractPngMeta(new Uint8Array(frPng.result));
+        if (!p) { importFailed('该 PNG 不含本平台的可编辑工程元数据。\n请使用本平台导出的图片，或导入工程 JSON。'); return; }
+        /* 只读模式下导出的图片，导入后必须能直接编辑，否则往返没有意义 */
+        p.settings = Object.assign({}, p.settings, { readonly: false });
+        applyImportedProject(JSON.stringify(p), '从 PNG 导入');
+      };
+      frPng.readAsArrayBuffer(file);
+      return;
+    }
     const fr = new FileReader();
     fr.onload = function () {
-      const v = SCHEMA.validate(fr.result);
-      if (!v.ok) {
-        alert('工程导入失败：\n\n' + v.errors.join('\n') + '\n\n请确认文件为本平台导出的 JSON。');
-        toast('导入失败：' + v.errors[0], 'warn'); return;
+      const text = String(fr.result || '');
+      if (isSvg) {
+        if (!window.TopoImageIO) { importFailed('图像元数据模块未加载，无法导入 SVG'); return; }
+        const p = window.TopoImageIO.extractSvgMeta(text);
+        if (!p) { importFailed('该 SVG 不含本平台的可编辑工程元数据。\n请使用本平台导出的图片，或导入工程 JSON。'); return; }
+        p.settings = Object.assign({}, p.settings, { readonly: false });
+        applyImportedProject(JSON.stringify(p), '从 SVG 导入');
+        return;
       }
-      const before = snapshot();
-      const d = JSON.parse(fr.result);
-      S = Object.assign(v.data, {
-        view: v.view || d.view || { x: 60, y: 40, zoom: 1 },
-        settings: Object.assign(S.settings, v.settings || d.settings || {})
-      });
-      selection = new Set(); history = []; future = [];
-      pushHistory(before, '导入工程');
-      syncToggles(); render(); renderAssets(); fit();
-      toast('导入成功：' + S.nodes.length + ' 个资产' + (v.warnings.length ? '（' + v.warnings.join('；') + '）' : ''));
+      applyImportedProject(text, '导入工程');
     };
     fr.readAsText(file, 'utf-8');
   }
@@ -1604,7 +1858,7 @@
     S.nodes = target.data.nodes; S.links = target.data.links; S.zones = target.data.zones;
     S.anchors = (target.data.anchors || []).slice();
     S.notes = target.data.notes; S.meta = target.data.meta; S.view = target.view;
-    selection = new Set(); pushHistory(before, '切换页面'); render(); fit();
+    selection = new Set(); resetTransient(); pushHistory(before, '切换页面'); render(); fit();
     toast('已切换到：' + target.name);
   }
   function addPage() {
@@ -1615,7 +1869,7 @@
     S.nodes = []; S.links = []; S.zones = []; S.anchors = []; S.notes = [];
     S.meta = Object.assign({}, SCHEMA.META_DEFAULTS, { name: name, docNo: S.meta.docNo });
     S.view = { x: 60, y: 40, zoom: 1 };
-    selection = new Set(); pushHistory(before, '新增页面'); render();
+    selection = new Set(); resetTransient(); pushHistory(before, '新增页面'); render();
     toast('已新建 ' + name);
   }
   function deletePage(id) {
@@ -1645,7 +1899,7 @@
     future.push(snapshot());
     restore(history[idx].data);
     history = history.slice(0, idx);
-    selection = new Set(); render();
+    selection = new Set(); resetTransient(); render();
     toast('已回退到「' + label + '」之前');
   }
   function saveBaseline() {
@@ -1693,7 +1947,7 @@
     const before = snapshot();
     S = emptyProject();
     S.meta.name = name || '未命名拓扑';
-    selection = new Set(); history = []; future = [];
+    selection = new Set(); history = []; future = []; resetTransient();
     pushHistory(before, '新建空白拓扑');
     syncToggles(); render(); toast('已新建空白拓扑');
   }
@@ -1703,7 +1957,7 @@
     const before = snapshot();
     S = Object.assign(d, { view: S.view, settings: S.settings, pages: S.pages, pageId: S.pageId });
     S.anchors = [];
-    selection = new Set(); linkDraft = null;
+    selection = new Set(); resetTransient();
     if (!silent) pushHistory(before, '载入模板：' + d.meta.name);
     setTool('select'); render();
     setTimeout(fit, 30);
@@ -1740,8 +1994,9 @@
       toast('已添加：' + iconOf(id).name);
     });
     $('inline-editor').addEventListener('keydown', function (e) {
-      if (e.key === 'Enter') { e.preventDefault(); commitInlineEditor(); }
-      if (e.key === 'Escape') { e.preventDefault(); this.style.display = 'none'; }
+      if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); commitInlineEditor(); }
+      /* 只取消就地改名，不能让 Escape 冒泡到 window 把整个选中集清空 */
+      if (e.key === 'Escape') { e.preventDefault(); e.stopPropagation(); this.style.display = 'none'; }
     });
     $('inline-editor').addEventListener('blur', commitInlineEditor);
 
@@ -1758,9 +2013,38 @@
         renderAssets(); return;
       }
       const it = e.target.closest('.asset-item'); if (!it) return;
-      pendingIcon = it.getAttribute('data-icon'); setTool('place');
+      pendingIcon = it.getAttribute('data-icon');
+      placeLock = !!(e.ctrlKey || e.shiftKey);
+      setTool('place');
+      if (placeLock) $('hint-text').textContent = '连续放置「' + iconOf(pendingIcon).name + '」中 · 点击画布连续放置，Esc / V 退出';
     });
-    $('asset-search').addEventListener('input', function (e) { assetFilter = e.target.value; renderAssets(); });
+    $('asset-search').addEventListener('input', function (e) {
+      if (searchScope === 'canvas') { renderCanvasHits(); return; }
+      assetFilter = e.target.value; renderAssets();
+    });
+    $('asset-search').addEventListener('keydown', function (e) {
+      if (e.key !== 'Enter' || searchScope !== 'canvas' || !canvasHits.length) return;
+      e.preventDefault();
+      locateCanvasHit(canvasHits[canvasHitIdx]);
+      canvasHitIdx = (canvasHitIdx + 1) % canvasHits.length;
+    });
+    $('btn-search-scope').onclick = function () {
+      searchScope = searchScope === 'library' ? 'canvas' : 'library';
+      this.textContent = searchScope === 'canvas' ? '画布内 ⇄' : '资产库 ⇄';
+      $('asset-search').placeholder = searchScope === 'canvas'
+        ? '搜画布资产名称 / IP / 区域，回车循环定位' : '搜设备或分类，如 防火墙、审计、WAF';
+      $('asset-search').value = '';
+      assetFilter = ''; renderAssets();
+      $('asset-search').focus();
+      if (searchScope === 'canvas') renderCanvasHits(); else clearCanvasHits();
+    };
+    $('canvas-hits').addEventListener('click', function (e) {
+      const b = e.target.closest ? e.target.closest('[data-hit]') : null;
+      if (!b) return;
+      const id = b.getAttribute('data-hit');
+      const idx = canvasHits.findIndex(function (n) { return n.id === id; });
+      if (idx >= 0) { canvasHitIdx = idx; locateCanvasHit(canvasHits[idx]); }
+    });
     $('asset-cats').addEventListener('click', function (e) {
       const b = e.target.closest('.cat-pill'); if (!b) return;
       activeCat = b.getAttribute('data-cat');
@@ -1787,17 +2071,17 @@
       const before = snapshot();
       S.nodes = []; S.links = []; S.zones = []; S.anchors = []; S.notes = [];
       S.meta = Object.assign({}, SCHEMA.META_DEFAULTS, { name: '未命名拓扑' });
-      selection = new Set(); S.view = { x: 60, y: 40, zoom: 1 };
+      selection = new Set(); S.view = { x: 60, y: 40, zoom: 1 }; resetTransient();
       pushHistory(before, '清空画布'); render();
     };
     $('btn-undo').onclick = function () {
       if (!history.length) return;
-      future.push(snapshot()); restore(history.pop().data); selection = new Set(); render();
+      future.push(snapshot()); restore(history.pop().data); selection = new Set(); resetTransient(); render();
     };
     $('btn-redo').onclick = function () {
       if (!future.length) return;
       history.push({ data: snapshot(), label: '重做前', time: new Date().toLocaleTimeString('zh-CN') });
-      restore(future.pop()); selection = new Set(); render();
+      restore(future.pop()); selection = new Set(); resetTransient(); render();
     };
     $('btn-link').onclick = function () { setTool(tool === 'link' ? 'select' : 'link'); };
     $('btn-hand').onclick = function () { setTool(tool === 'hand' ? 'select' : 'hand'); };
@@ -1954,7 +2238,7 @@
             w: maxX - minX, h: maxY - minY, label: '安全区域'
           });
           S.zones.push(z);
-          ns.forEach(function (n) { n.parent = z.id; if (!n.zone) n.zone = z.label; });
+          ns.forEach(function (n) { syncNodeZone(n, z); });
           selection = new Set([z.id]);
         }, '打包为区域');
         toast('已将 ' + ns.length + ' 个资产打包进安全区域');
@@ -1993,6 +2277,15 @@
             if (f && (f.t === 'zone' || f.t === 'link')) { f.o.labelDx = 0; f.o.labelDy = 0; }
           });
         }, '重置标签偏移');
+      }
+      if (a === 'reset-bend') {
+        mutate(function () {
+          selection.forEach(function (id) {
+            const f = findObj(id);
+            if (f && f.t === 'link') f.o.bend = null;
+          });
+        }, '重置走线拐点');
+        toast('已恢复自动走线');
       }
       if (a === 'swap-link') {
         const cur = findObj([...selection][0]);
@@ -2093,10 +2386,17 @@
       const tag = (e.target.tagName || '').toLowerCase();
       const editing = tag === 'input' || tag === 'textarea' || tag === 'select' || e.target.isContentEditable;
       if (e.key === 'Escape') {
+        /* 有弹窗/菜单/就地编辑框时，Esc 只关这一层，不应顺带清空画布选中集 */
+        const hadOverlay = ['help-modal', 'report-modal', 'start-modal', 'export-modal']
+          .some(function (id) { return $(id).classList.contains('show'); }) ||
+          (document.querySelectorAll('.menu.show, #context-menu.show') || []).length > 0 ||
+          $('inline-editor').style.display === 'block';
         $('help-modal').classList.remove('show'); $('report-modal').classList.remove('show');
         $('start-modal').classList.remove('show'); $('export-modal').classList.remove('show');
         $('inline-editor').style.display = 'none'; closeMenus();
-        linkDraft = null; portDrag = null; zoneDraw = null; labelDrag = null; hoverId = null;
+        flushEditBefore();
+        if (hadOverlay) return;
+        linkDraft = null; portDrag = null; zoneDraw = null; labelDrag = null; waypointDrag = null; hoverId = null;
         if (tool !== 'select') setTool('select'); else { selection.clear(); render(); }
         return;
       }
@@ -2154,7 +2454,7 @@
         const v = SCHEMA.validate(parsed);
         if (v.ok && (v.data.nodes.length || v.data.zones.length)) {
           S = Object.assign(v.data, {
-            view: parsed.view || { x: 60, y: 40, zoom: 1 },
+            view: SCHEMA.sanitizeView(parsed.view),
             settings: Object.assign(S.settings, parsed.settings || {})
           });
           /* v2 及更早的工程把「默认带箭头」写进了 settings，升级 v3 时一并纠正 */
