@@ -84,10 +84,17 @@ button{cursor:pointer}
 .side-panel{display:none;flex:1;min-height:0;overflow-y:auto;padding:10px}
 .side-panel.active{display:block}
 .side-panel#panel-prop.active,#panel-list.active{display:flex;flex-direction:column}
-.search-box{margin-bottom:10px}
-.search-box input{width:100%;height:34px;background:var(--bg);border:1px solid var(--line2);border-radius:7px;padding:0 10px;color:var(--text);font-size:12px}
+.search-box{margin-bottom:10px;position:relative}
+.search-box input{width:100%;height:34px;background:var(--bg);border:1px solid var(--line2);border-radius:7px;padding:0 78px 0 10px;color:var(--text);font-size:12px}
 .search-box input:focus{border-color:var(--accent);box-shadow:0 0 0 2px rgba(59,130,246,.18)}
 .search-box input::placeholder{color:var(--dim)}
+.search-scope{position:absolute;right:4px;top:5px;height:24px;border:1px solid var(--line2);border-radius:5px;background:var(--panel2);color:var(--muted);font-size:10px;padding:0 6px;cursor:pointer}
+.search-scope:hover{color:var(--text);border-color:var(--accent)}
+.canvas-hits{position:absolute;left:0;right:0;top:38px;z-index:30;display:none;background:var(--panel2);border:1px solid var(--line2);border-radius:7px;box-shadow:0 10px 28px rgba(0,0,0,.45);max-height:260px;overflow:auto}
+.canvas-hits button{display:block;width:100%;text-align:left;background:transparent;border:0;color:var(--text);font-size:12px;padding:7px 9px;cursor:pointer}
+.canvas-hits button:hover{background:rgba(59,130,246,.16)}
+.canvas-hits small{color:var(--dim);margin-left:6px}
+.canvas-hits .hit-more{font-size:10px;color:var(--dim);padding:5px 9px}
 .cat-pills{display:flex;flex-wrap:wrap;gap:5px;margin-bottom:12px}
 .cat-pill{background:var(--panel2);border:1px solid var(--line2);color:var(--muted);border-radius:20px;padding:4px 9px;font-size:11px;display:flex;align-items:center;gap:5px}
 .cat-pill:hover{color:#fff;border-color:#4a5b7a}
@@ -235,7 +242,7 @@ button{cursor:pointer}
 .page-add:hover{color:var(--accent);border-color:var(--accent)}
 #canvas{flex:1;width:100%;height:auto;min-height:0;touch-action:none}
 #canvas.tool-link .node:hover .node-bg{stroke:#f59e0b;stroke-width:2.4}
-#inline-editor{position:absolute;display:none;z-index:20;background:#fff;border:2px solid var(--accent);border-radius:5px;padding:3px 6px;font-size:12px;color:#1e293b;box-shadow:0 4px 14px rgba(20,40,80,.25)}
+#inline-editor{position:absolute;display:none;z-index:20;background:#fff;border:2px solid var(--accent);border-radius:5px;padding:3px 6px;font-size:12px;color:#1e293b;box-shadow:0 4px 14px rgba(20,40,80,.25);line-height:1.4;resize:none;overflow:hidden;font-family:inherit}
 .minimap-wrap{position:absolute;right:14px;bottom:14px;width:196px;background:rgba(255,255,255,.97);border:1px solid #d8e0ec;border-radius:9px;box-shadow:0 4px 16px rgba(20,40,80,.16);overflow:hidden;z-index:6}
 .mm-title{font-size:10px;color:#64748b;padding:5px 9px;border-bottom:1px solid #e6ebf3;background:#f7f9fc}
 #minimap{display:block;cursor:crosshair}
@@ -246,7 +253,7 @@ button{cursor:pointer}
 .fld-sec-hd small{font-weight:400;color:var(--dim);font-size:10px}
 /* 区域标签九宫格位置选择 */
 .pos-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:5px;max-width:170px}
-.pos-grid button{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--panel2);color:var(--txt);font-size:15px;line-height:1;transition:.12s}
+.pos-grid button{height:30px;border:1px solid var(--line);border-radius:7px;background:var(--panel2);color:var(--text);font-size:15px;line-height:1;transition:.12s}
 .pos-grid button:hover{border-color:var(--accent);background:rgba(59,130,246,.1)}
 .pos-grid button.active{border-color:var(--accent);background:var(--accent);color:#fff;box-shadow:0 2px 8px rgba(37,99,235,.35)}
 /* 选中对象四边快捷连线端口 */
@@ -303,6 +310,8 @@ button{cursor:pointer}
 /* ---------------- v2：只读评审模式 ---------------- */
 body.readonly-mode .toolbar .btn:not(#btn-readonly):not(#btn-export){opacity:.5}
 body.readonly-mode .canvas-badge{background:#fff1f2;color:#be123c;border-color:#fecdd3}
+/* 只读评审：属性面板控件一并禁编辑（JS 层 onPropInput/onPropChange 也做了拦截） */
+body.readonly-mode #panel-prop .fld input,body.readonly-mode #panel-prop .fld select,body.readonly-mode #panel-prop .fld textarea{pointer-events:none;opacity:.55}
 #btn-readonly.active{background:rgba(245,158,11,.18);border-color:var(--warn);color:#fcd34d}
 
 /* ---------------- v2.1：导出结果面板 ---------------- */
